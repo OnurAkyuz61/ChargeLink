@@ -502,14 +502,14 @@ private final class BluetoothRuntimeResources {
             IOBluetoothDevice.register(
                 forConnectNotifications: connectionBridge,
                 selector: #selector(BluetoothConnectionBridge.deviceConnected(notification:)),
-                of: nil
+                ofClass: nil
             )
         )
         ioBluetoothNotifications.append(
             IOBluetoothDevice.register(
                 forDisconnectNotifications: connectionBridge,
                 selector: #selector(BluetoothConnectionBridge.deviceDisconnected(notification:)),
-                of: nil
+                ofClass: nil
             )
         )
 
