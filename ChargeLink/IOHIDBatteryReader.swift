@@ -68,6 +68,38 @@ enum IOHIDBatteryReader {
         return map
     }
 
+    /// Reads battery via IOHIDDevice created from an `AppleUserHIDEventService` registry entry.
+    static func batteryPercent(ioService: io_service_t) -> Int? {
+        let device = IOHIDDeviceCreate(kCFAllocatorDefault, ioService)
+        return readBatteryFromDevice(device)
+    }
+
+    static func batteriesFromUserHIDEventServices() -> [String: Int] {
+        guard let matching = IOServiceMatching("AppleUserHIDEventService") else { return [:] }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return [:]
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var map: [String: Int] = [:]
+        while case let entry = IOIteratorNext(iterator), entry != 0 {
+            defer { IOObjectRelease(entry) }
+            guard let product = IORegistryEntryCreateCFProperty(
+                entry,
+                "Product" as CFString,
+                kCFAllocatorDefault,
+                0
+            )?.takeRetainedValue() as? String, !product.isEmpty else { continue }
+
+            guard let percent = batteryPercent(ioService: entry) else { continue }
+            let key = DeviceNameMatcher.normalize(product)
+            map[key] = Swift.max(map[key] ?? 0, percent)
+            BluetoothDebug.log("HID event service: \(product) → \(percent)%")
+        }
+        return map
+    }
+
     static func batteryPercent(productName: String) -> Int? {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
 

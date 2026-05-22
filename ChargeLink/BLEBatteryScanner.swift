@@ -40,8 +40,15 @@ final class BLEBatteryScanner: NSObject {
         ensureManager()
         await waitUntilPoweredOn()
 
-        guard let centralManager, centralManager.state == .poweredOn else {
-            BluetoothDebug.log("BLE: central not powered on")
+        guard let centralManager else { return [:] }
+
+        if #available(macOS 10.15, *) {
+            BluetoothDebug.log("BLE: authorization → \(CBCentralManager.authorization.rawValue)")
+        }
+        BluetoothDebug.log("BLE: state → \(centralManager.state.rawValue)")
+
+        guard centralManager.state == .poweredOn else {
+            BluetoothDebug.log("BLE: central not powered on — grant Bluetooth in System Settings")
             return [:]
         }
 
@@ -182,21 +189,55 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
     }
 
     func discoverBattery(on peripheral: CBPeripheral) {
-        if peripheral.services?.contains(where: { $0.uuid == serviceUUID }) == true,
-           let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) {
-            peripheral.discoverCharacteristics([levelUUID], for: service)
+        if let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) {
+            readBattery(from: service, peripheral: peripheral)
         } else {
-            peripheral.discoverServices([serviceUUID])
+            peripheral.discoverServices(nil)
         }
+    }
+
+    private func readBattery(from service: CBService, peripheral: CBPeripheral) {
+        if let characteristic = service.characteristics?.first(where: { $0.uuid == levelUUID }) {
+            requestValue(for: characteristic, on: peripheral)
+        } else {
+            peripheral.discoverCharacteristics([levelUUID], for: service)
+        }
+    }
+
+    private func requestValue(for characteristic: CBCharacteristic, on peripheral: CBPeripheral) {
+        if characteristic.properties.contains(.notify) {
+            peripheral.setNotifyValue(true, for: characteristic)
+        }
+        if let data = characteristic.value, let percent = Self.parseBatteryData(data) {
+            scanner?.storeReading(name: peripheral.name, percent: percent)
+            complete(peripheral)
+            return
+        }
+        peripheral.readValue(for: characteristic)
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         Task { @MainActor in
-            guard error == nil, let service = peripheral.services?.first(where: { $0.uuid == self.serviceUUID }) else {
+            guard error == nil, let services = peripheral.services else {
                 self.complete(peripheral)
                 return
             }
-            peripheral.discoverCharacteristics([self.levelUUID], for: service)
+            if let batteryService = services.first(where: { $0.uuid == self.serviceUUID }) {
+                self.readBattery(from: batteryService, peripheral: peripheral)
+                return
+            }
+            for service in services {
+                if let chars = service.characteristics,
+                   let characteristic = chars.first(where: { $0.uuid == self.levelUUID }) {
+                    self.requestValue(for: characteristic, on: peripheral)
+                    return
+                }
+            }
+            for service in services where service.characteristics == nil {
+                peripheral.discoverCharacteristics([self.levelUUID], for: service)
+                return
+            }
+            self.complete(peripheral)
         }
     }
 
@@ -211,15 +252,7 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
                 self.complete(peripheral)
                 return
             }
-            if characteristic.properties.contains(.notify) {
-                peripheral.setNotifyValue(true, for: characteristic)
-            }
-            if let data = characteristic.value, let percent = Self.parseBatteryData(data) {
-                self.scanner?.storeReading(name: peripheral.name, percent: percent)
-                self.complete(peripheral)
-                return
-            }
-            peripheral.readValue(for: characteristic)
+            self.requestValue(for: characteristic, on: peripheral)
         }
     }
 

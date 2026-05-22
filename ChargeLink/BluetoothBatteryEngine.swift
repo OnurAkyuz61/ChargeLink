@@ -44,7 +44,7 @@ enum DeviceNameMatcher {
 
 @MainActor
 enum BluetoothBatteryEngine {
-    private static var mergedBatteriesByName: [String: Int] = [:]
+    private static var mergedReadingsByKey: [String: BatteryReading] = [:]
 
     private static let registryBatteryKeys = [
         "BatteryPercent",
@@ -74,23 +74,43 @@ enum BluetoothBatteryEngine {
     static func refreshAllCaches() async {
         _ = await BLEBatteryScanner.shared.refresh()
 
-        var merged = IOHIDBatteryReader.allProductBatteries()
-        for (name, percent) in IORegistryBatteryReader.allProductBatteries() {
-            merged[name] = Swift.max(merged[name] ?? 0, percent)
-        }
-        for (name, percent) in BLEBatteryScanner.shared.allReadings() {
-            merged[name] = Swift.max(merged[name] ?? 0, percent)
+        var merged: [String: BatteryReading] = [:]
+
+        func store(_ key: String, _ reading: BatteryReading, replace: Bool = false) {
+            let normalized = DeviceNameMatcher.normalize(key)
+            guard !normalized.isEmpty else { return }
+            if !replace, let existing = merged[normalized], existing.hasValue { return }
+            merged[normalized] = reading
         }
 
-        mergedBatteriesByName = merged
-        BluetoothDebug.log("Battery cache: \(merged.count) product(s) — \(merged)")
+        for (name, percent) in BLEBatteryScanner.shared.allReadings() {
+            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "CoreBluetooth"))
+        }
+        for (name, percent) in IOHIDBatteryReader.allProductBatteries() {
+            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "IOHID"))
+        }
+        for (name, percent) in IOHIDBatteryReader.batteriesFromUserHIDEventServices() {
+            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "HID-EventService"))
+        }
+        for (name, percent) in IORegistryBatteryReader.allProductBatteries() {
+            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "IORegistry"))
+        }
+        // Same source macOS Bluetooth settings uses for AirPods battery text.
+        for (key, info) in SystemBluetoothProfilerReader.fetchConnectedDeviceBatteries() {
+            if let reading = info.asBatteryReading() {
+                store(key, reading, replace: true)
+            }
+        }
+
+        mergedReadingsByKey = merged
+        BluetoothDebug.log("Battery cache: \(merged.count) entries — \(merged.mapValues(\.displayText))")
     }
 
     /// Resolves battery for an IOBluetooth-connected device using all public subsystems.
     static func resolveBattery(name: String, address: String) -> BatteryReading {
         BluetoothDebug.log("BatteryEngine resolve '\(name)' @ \(address)")
 
-        if let cached = batteryFromMergedCache(deviceName: name) {
+        if let cached = batteryFromMergedCache(deviceName: name, address: address) {
             BluetoothDebug.log("  → \(cached.displayText) [cache]")
             return cached
         }
@@ -122,14 +142,16 @@ enum BluetoothBatteryEngine {
         return .unknown
     }
 
-    private static func batteryFromMergedCache(deviceName: String) -> BatteryReading? {
-        let key = DeviceNameMatcher.normalize(deviceName)
-        if let percent = mergedBatteriesByName[key] {
-            return BatteryReading(percent: percent, detailText: "\(percent)%", source: "cache-exact")
-        }
-        for (cachedName, percent) in mergedBatteriesByName {
-            if DeviceNameMatcher.matches(cachedName, target: key) {
-                return BatteryReading(percent: percent, detailText: "\(percent)%", source: "cache-fuzzy")
+    private static func batteryFromMergedCache(deviceName: String, address: String) -> BatteryReading? {
+        let nameKey = DeviceNameMatcher.normalize(deviceName)
+        let addrKey = BluetoothAddressNormalizer.normalize(address)
+
+        if let reading = mergedReadingsByKey[nameKey], reading.hasValue { return reading }
+        if !addrKey.isEmpty, let reading = mergedReadingsByKey[addrKey], reading.hasValue { return reading }
+
+        for (cachedKey, reading) in mergedReadingsByKey where reading.hasValue {
+            if DeviceNameMatcher.matches(cachedKey, target: nameKey) {
+                return reading
             }
         }
         return nil
