@@ -302,10 +302,17 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
                 return
             }
             for service in services {
-                if let chars = service.characteristics,
-                   let characteristic = chars.first(where: { $0.uuid == self.levelUUID }) {
-                    self.requestValue(for: characteristic, on: peripheral)
-                    return
+                if let chars = service.characteristics {
+                    let targets = chars.filter {
+                        $0.uuid == self.levelUUID || $0.uuid == self.powerStateUUID
+                    }
+                    if !targets.isEmpty {
+                        self.pendingCharacteristics = targets.count
+                        for characteristic in targets {
+                            self.requestValue(for: characteristic, on: peripheral)
+                        }
+                        return
+                    }
                 }
             }
             for service in services where service.characteristics == nil {

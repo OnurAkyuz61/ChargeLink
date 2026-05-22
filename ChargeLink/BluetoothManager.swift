@@ -40,6 +40,15 @@ enum IORegistryBatteryReader {
         "BatteryPercentCase",
     ]
 
+    private static let chargingKeys: [String] = [
+        "BatteryIsCharging",
+        "IsCharging",
+        "ExternalConnected",
+        "ACPowered",
+        "AppleDeviceIsCharging",
+        "kIOPMPSExternalConnectedKey",
+    ]
+
     private static let capacityKeys = (current: "CurrentCapacity", max: "MaxCapacity")
 
     private static let registryPlanes: [String] = [
@@ -112,6 +121,35 @@ enum IORegistryBatteryReader {
             }
         }
 
+        return map
+    }
+
+    /// Registry nodes that expose an explicit charging / external-power flag.
+    static func allChargingStates() -> [String: Bool] {
+        var map: [String: Bool] = [:]
+
+        for className in hidEventServiceClasses + ["IOBluetoothDevice"] {
+            guard let matching = IOServiceMatching(className) else { continue }
+            var iterator: io_iterator_t = 0
+            guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+                continue
+            }
+            defer { IOObjectRelease(iterator) }
+
+            while case let entry = IOIteratorNext(iterator), entry != 0 {
+                defer { IOObjectRelease(entry) }
+                guard let props = copyProperties(for: entry) else { continue }
+                let names = namePropertyKeys.compactMap { props[$0] as? String }.filter { !$0.isEmpty }
+                guard !names.isEmpty else { continue }
+                guard readChargingFlag(on: entry) else { continue }
+
+                for name in names {
+                    let key = DeviceNameMatcher.normalize(name)
+                    map[key] = true
+                    BluetoothDebug.log("IORegistry charging: \(name)")
+                }
+            }
+        }
         return map
     }
 
@@ -282,6 +320,50 @@ enum IORegistryBatteryReader {
             }
         }
         return nil
+    }
+
+    private static func readChargingFlag(on entry: io_registry_entry_t) -> Bool {
+        if readDirectChargingProperty(on: entry) { return true }
+        var found = false
+        deepScanCharging(entry: entry, depth: 0, found: &found)
+        return found
+    }
+
+    private static func readDirectChargingProperty(on entry: io_registry_entry_t) -> Bool {
+        for key in chargingKeys {
+            guard let value = copyProperty(key, from: entry) else { continue }
+            if chargingValueIsTrue(value) { return true }
+        }
+        for (key, value) in (copyProperties(for: entry) ?? [:]) where key.lowercased().contains("charg") {
+            if chargingValueIsTrue(value) { return true }
+        }
+        return false
+    }
+
+    private static func deepScanCharging(entry: io_registry_entry_t, depth: Int, found: inout Bool) {
+        guard depth <= maxSearchDepth, !found else { return }
+        if readDirectChargingProperty(on: entry) {
+            found = true
+            return
+        }
+        var childIterator: io_iterator_t = 0
+        guard IORegistryEntryGetChildIterator(entry, kIOServicePlane, &childIterator) == KERN_SUCCESS else { return }
+        defer { IOObjectRelease(childIterator) }
+        while case let child = IOIteratorNext(childIterator), child != 0 {
+            deepScanCharging(entry: child, depth: depth + 1, found: &found)
+            IOObjectRelease(child)
+            if found { return }
+        }
+    }
+
+    private static func chargingValueIsTrue(_ value: Any) -> Bool {
+        if let b = value as? Bool { return b }
+        if let n = value as? NSNumber { return n.boolValue }
+        if let s = value as? String {
+            let lower = s.lowercased()
+            return lower == "yes" || lower == "true" || lower.contains("charg")
+        }
+        return false
     }
 
     private static func copyProperty(_ key: String, from entry: io_registry_entry_t) -> Any? {

@@ -131,8 +131,77 @@ enum BluetoothBatteryEngine {
             store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "HID-EventService"))
         }
 
+        applyChargingFlags(to: &merged)
+
         mergedReadingsByKey = merged
-        BluetoothDebug.log("Battery cache: \(merged.count) entries — \(merged.mapValues(\.displayText))")
+        let chargingSummary = merged.filter(\.value.isCharging).map { "\($0.key)=charging" }
+        if chargingSummary.isEmpty {
+            BluetoothDebug.log("Battery cache: \(merged.count) entries — \(merged.mapValues(\.displayText))")
+        } else {
+            BluetoothDebug.log("Battery cache: \(merged.count) entries — \(merged.mapValues(\.displayText)); charging: \(chargingSummary)")
+        }
+    }
+
+    /// Merges charging flags from HID++, IORegistry, BLE, profiler, and percent-trend inference.
+    private static func applyChargingFlags(to merged: inout [String: BatteryReading]) {
+        func markCharging(_ key: String) {
+            let normalized = DeviceNameMatcher.normalize(key)
+            guard !normalized.isEmpty else { return }
+            if var reading = merged[normalized] {
+                reading = BatteryReading(
+                    percent: reading.percent,
+                    detailText: reading.detailText,
+                    isCharging: true,
+                    source: reading.source
+                )
+                merged[normalized] = reading
+                return
+            }
+            for (cachedKey, reading) in merged {
+                guard DeviceNameMatcher.matches(cachedKey, target: normalized) else { continue }
+                merged[cachedKey] = BatteryReading(
+                    percent: reading.percent,
+                    detailText: reading.detailText,
+                    isCharging: true,
+                    source: reading.source
+                )
+            }
+        }
+
+        for (name, info) in LogitechHIDPPBatteryReader.allBatteryInfo() where info.isCharging {
+            markCharging(name)
+            if info.isCharging, let percent = info.percent {
+                BatteryChargingTrendTracker.markCharging(deviceKey: name, currentPercent: percent)
+            }
+        }
+
+        for (name, charging) in IORegistryBatteryReader.allChargingStates() where charging {
+            markCharging(name)
+        }
+
+        for (key, reading) in merged {
+            guard let percent = reading.percent else { continue }
+            let trend = BatteryChargingTrendTracker.isCharging(deviceKey: key, currentPercent: percent)
+            if trend || reading.isCharging {
+                merged[key] = BatteryReading(
+                    percent: reading.percent,
+                    detailText: reading.detailText,
+                    isCharging: reading.isCharging || trend,
+                    source: reading.source
+                )
+                if trend {
+                    BatteryChargingTrendTracker.markCharging(deviceKey: key, currentPercent: percent)
+                }
+            }
+        }
+    }
+
+    private static func resolveCharging(deviceName: String, percent: Int?, base: Bool) -> Bool {
+        if base { return true }
+        if let percent, BatteryChargingTrendTracker.isCharging(deviceKey: deviceName, currentPercent: percent) {
+            return true
+        }
+        return false
     }
 
     /// Resolves battery for an IOBluetooth-connected device using all public subsystems.
@@ -140,8 +209,17 @@ enum BluetoothBatteryEngine {
         BluetoothDebug.log("BatteryEngine resolve '\(name)' @ \(address)")
 
         if let cached = batteryFromMergedCache(deviceName: name, address: address) {
-            BluetoothDebug.log("  → \(cached.displayText) [cache]")
-            return cached
+            let charging = resolveCharging(deviceName: name, percent: cached.percent, base: cached.isCharging)
+            let reading = charging == cached.isCharging
+                ? cached
+                : BatteryReading(
+                    percent: cached.percent,
+                    detailText: cached.detailText,
+                    isCharging: charging,
+                    source: cached.source
+                )
+            BluetoothDebug.log("  → \(reading.displayText)\(reading.isCharging ? " ⚡" : "") [cache]")
+            return reading
         }
 
         var candidates: [PrioritizedBatteryReading] = []
@@ -192,7 +270,8 @@ enum BluetoothBatteryEngine {
         guard let percent = BLEBatteryScanner.shared.percent(matchingDeviceName: deviceName) else {
             return nil
         }
-        let charging = BLEBatteryScanner.shared.reading(matchingDeviceName: deviceName)?.isCharging ?? false
+        let bleCharging = BLEBatteryScanner.shared.reading(matchingDeviceName: deviceName)?.isCharging ?? false
+        let charging = resolveCharging(deviceName: deviceName, percent: percent, base: bleCharging)
         return BatteryReading(percent: percent, detailText: "\(percent)%", isCharging: charging, source: "CoreBluetooth-0x2A19")
     }
 
@@ -222,15 +301,18 @@ enum BluetoothBatteryEngine {
         }
 
         if let percent = IORegistryBatteryReader.batteryFromHIDEventServices(name: name, address: address) {
-            return BatteryReading(percent: percent, detailText: "\(percent)%", source: "IORegistry-HIDEvent")
+            let charging = resolveCharging(deviceName: name, percent: percent, base: false)
+            return BatteryReading(percent: percent, detailText: "\(percent)%", isCharging: charging, source: "IORegistry-HIDEvent")
         }
 
         if let percent = IORegistryBatteryReader.batteryPercent(name: name, address: address) {
-            return BatteryReading(percent: percent, detailText: "\(percent)%", source: "IORegistry-IOBluetooth")
+            let charging = resolveCharging(deviceName: name, percent: percent, base: false)
+            return BatteryReading(percent: percent, detailText: "\(percent)%", isCharging: charging, source: "IORegistry-IOBluetooth")
         }
 
         if let percent = aggressiveRegistryScan(name: name, address: address) {
-            return BatteryReading(percent: percent, detailText: "\(percent)%", source: "IORegistry-aggressive")
+            let charging = resolveCharging(deviceName: name, percent: percent, base: false)
+            return BatteryReading(percent: percent, detailText: "\(percent)%", isCharging: charging, source: "IORegistry-aggressive")
         }
 
         return nil
@@ -348,7 +430,8 @@ enum BluetoothBatteryEngine {
         guard let percent = IOHIDBatteryReader.batteryPercent(productName: deviceName) else {
             return nil
         }
-        return BatteryReading(percent: percent, detailText: "\(percent)%", source: "IOHID")
+        let charging = resolveCharging(deviceName: deviceName, percent: percent, base: false)
+        return BatteryReading(percent: percent, detailText: "\(percent)%", isCharging: charging, source: "IOHID")
     }
 
     // MARK: - Registry helpers
