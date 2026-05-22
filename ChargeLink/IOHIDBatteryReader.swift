@@ -31,6 +31,8 @@ enum IOHIDBatteryReader {
     /// Logitech BLE devices expose battery on vendor usage page 65347 (0xFF43).
     private static let logitechVendorPage: UInt32 = 65347
     private static let logitechBatteryUsage: UInt32 = 514
+    /// Observed charging-state usages on the same vendor page (device-dependent).
+    private static let logitechChargingUsages: Set<UInt32> = [513, 515, 516, 517]
 
     private static let batteryUsageMatchers: [(UInt32, UInt32?)] = [
         (logitechVendorPage, logitechBatteryUsage),
@@ -41,6 +43,31 @@ enum IOHIDBatteryReader {
         (0xFF07, nil),
         (0xFF43, nil),
     ]
+
+    /// Vendor HID elements that indicate an active charge state (Logitech page 65347).
+    static func allChargingStates() -> [String: Bool] {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(manager, nil)
+        guard IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
+            return [:]
+        }
+        defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+        guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
+            return [:]
+        }
+
+        var map: [String: Bool] = [:]
+        for device in deviceSet {
+            guard let product = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String,
+                  !product.isEmpty else { continue }
+            guard readChargingFromVendorElements(device: device) else { continue }
+            let key = DeviceNameMatcher.normalize(product)
+            map[key] = true
+            BluetoothDebug.log("IOHID charging element: \(product)")
+        }
+        return map
+    }
 
     /// Scans every HID device and returns product name → battery % (for merge with IOBluetooth list).
     static func allProductBatteries() -> [String: Int] {
@@ -133,6 +160,34 @@ enum IOHIDBatteryReader {
         }
 
         return bestPercent
+    }
+
+    private static func readChargingFromVendorElements(device: IOHIDDevice) -> Bool {
+        guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
+            return false
+        }
+        defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+        guard let elements = IOHIDDeviceCopyMatchingElements(
+            device,
+            [kIOHIDElementUsagePageKey: logitechVendorPage] as CFDictionary,
+            IOOptionBits(kIOHIDOptionsTypeNone)
+        ) as? Set<IOHIDElement> else {
+            return false
+        }
+
+        for element in elements {
+            let usage = UInt32(IOHIDElementGetUsage(element))
+            guard usage != logitechBatteryUsage else { continue }
+            guard logitechChargingUsages.contains(usage) || IOHIDElementGetLogicalMax(element) <= 4 else {
+                continue
+            }
+            guard let value = readElementValue(device: device, element: element) else { continue }
+            if value == 1 || (2...4).contains(value) {
+                return true
+            }
+        }
+        return false
     }
 
     private static func readBatteryFromDevice(_ device: IOHIDDevice) -> Int? {

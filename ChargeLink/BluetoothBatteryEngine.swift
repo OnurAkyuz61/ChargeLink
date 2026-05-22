@@ -131,6 +131,21 @@ enum BluetoothBatteryEngine {
             store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "HID-EventService"))
         }
 
+        let kiros = await LogitechKirosBatteryClient.fetchBatteryInfo()
+        for (name, info) in kiros {
+            let pct = info.percent
+            store(
+                name,
+                BatteryReading(
+                    percent: pct,
+                    detailText: pct.map { "\($0)%" },
+                    isCharging: info.isCharging,
+                    source: "Logi-Kiros"
+                ),
+                replace: info.percent != nil
+            )
+        }
+
         applyChargingFlags(to: &merged)
 
         mergedReadingsByKey = merged
@@ -170,12 +185,16 @@ enum BluetoothBatteryEngine {
 
         for (name, info) in LogitechHIDPPBatteryReader.allBatteryInfo() where info.isCharging {
             markCharging(name)
-            if info.isCharging, let percent = info.percent {
+            if let percent = info.percent {
                 BatteryChargingTrendTracker.markCharging(deviceKey: name, currentPercent: percent)
             }
         }
 
         for (name, charging) in IORegistryBatteryReader.allChargingStates() where charging {
+            markCharging(name)
+        }
+
+        for (name, charging) in IOHIDBatteryReader.allChargingStates() where charging {
             markCharging(name)
         }
 
