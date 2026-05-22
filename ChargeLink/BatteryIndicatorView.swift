@@ -2,23 +2,34 @@
 //  BatteryIndicatorView.swift
 //  ChargeLink
 //
-//  Apple System Settings–style battery glyphs (SF Symbols + palette + charging animation).
+//  macOS System Settings–style battery glyph (custom shape + şarj şimşeği).
 //
 
 import SwiftUI
+
+// MARK: - App icon (sabit menü çubuğu)
+
+enum ChargeLinkMenuBarIcon {
+    static let symbolName = "bolt.horizontal.fill"
+}
 
 // MARK: - Style
 
 enum BatteryIndicatorStyle {
     case standard
     case compact
-    case menuBar
 
-    var iconFont: Font {
+    var bodyWidth: CGFloat {
         switch self {
-        case .standard: .body
-        case .compact: .caption
-        case .menuBar: .system(size: 13, weight: .medium)
+        case .standard: 26
+        case .compact: 22
+        }
+    }
+
+    var bodyHeight: CGFloat {
+        switch self {
+        case .standard: 12
+        case .compact: 10
         }
     }
 
@@ -26,20 +37,94 @@ enum BatteryIndicatorStyle {
         switch self {
         case .standard: .subheadline.monospacedDigit()
         case .compact: .caption.monospacedDigit()
-        case .menuBar: .caption2.monospacedDigit()
         }
     }
 
     var spacing: CGFloat {
         switch self {
-        case .standard: 5
+        case .standard: 6
         case .compact: 4
-        case .menuBar: 3
         }
     }
 }
 
-// MARK: - Single battery (Apple palette)
+// MARK: - Renkler (turuncu yok — düşük pil kırmızı)
+
+enum BatteryLevelColors {
+    static func fill(for percent: Int, isCharging: Bool) -> Color {
+        if isCharging { return .green }
+        if percent <= 20 { return .red }
+        return .green
+    }
+
+    static func text(for percent: Int, isCharging: Bool) -> Color {
+        if isCharging { return .green }
+        if percent <= 20 { return .red }
+        return .primary
+    }
+}
+
+// MARK: - Custom battery shape (Apple benzeri)
+
+private struct MacBatteryIcon: View {
+    let percent: Int
+    let isCharging: Bool
+    let style: BatteryIndicatorStyle
+
+    @State private var boltPulse = false
+
+    private var fillFraction: CGFloat {
+        CGFloat(max(0, min(100, percent))) / 100
+    }
+
+    private var fillColor: Color {
+        BatteryLevelColors.fill(for: percent, isCharging: isCharging)
+    }
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.32), lineWidth: 1)
+
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(fillColor)
+                    .padding(2)
+                    .frame(
+                        width: max(3, (style.bodyWidth - 4) * fillFraction),
+                        alignment: .leading
+                    )
+                    .animation(.snappy(duration: 0.35), value: percent)
+
+                if isCharging {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: style == .compact ? 6 : 7, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .scaleEffect(boltPulse ? 1.08 : 0.92)
+                        .animation(
+                            .easeInOut(duration: 0.85).repeatForever(autoreverses: true),
+                            value: boltPulse
+                        )
+                }
+            }
+            .frame(width: style.bodyWidth, height: style.bodyHeight)
+
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(Color.primary.opacity(0.32))
+                .frame(width: 2, height: style.bodyHeight * 0.42)
+        }
+        .onAppear {
+            boltPulse = isCharging
+        }
+        .onChange(of: isCharging) { _, charging in
+            boltPulse = charging
+        }
+    }
+}
+
+// MARK: - Row indicator
 
 struct BatteryIndicatorView: View {
     let percent: Int
@@ -47,105 +132,35 @@ struct BatteryIndicatorView: View {
     var style: BatteryIndicatorStyle = .standard
     var showsPercentText: Bool = true
 
-    @State private var chargingPhase = false
-
     var body: some View {
         HStack(spacing: style.spacing) {
-            batteryForeground
-                .font(style.iconFont)
-                .symbolRenderingMode(.palette)
-                .symbolEffect(.bounce, options: .nonRepeating, value: percent)
-                .contentTransition(.symbolEffect(.replace))
-                .animation(.snappy(duration: 0.35), value: percent)
-                .animation(.snappy(duration: 0.35), value: isCharging)
+            MacBatteryIcon(percent: percent, isCharging: isCharging, style: style)
 
             if showsPercentText {
-                Text("\(percent)%")
-                    .font(style.percentFont)
-                    .foregroundStyle(percentColor)
-                    .contentTransition(.numericText())
-                    .animation(.snappy(duration: 0.35), value: percent)
+                HStack(spacing: 2) {
+                    if isCharging {
+                        Image(systemName: "bolt.fill")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.green)
+                    }
+                    Text("\(percent)%")
+                        .font(style.percentFont)
+                        .foregroundStyle(BatteryLevelColors.text(for: percent, isCharging: isCharging))
+                        .contentTransition(.numericText())
+                        .animation(.snappy(duration: 0.35), value: percent)
+                }
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityText)
-        .onAppear { updateChargingAnimation() }
-        .onChange(of: isCharging) { _, _ in updateChargingAnimation() }
-    }
-
-    @ViewBuilder
-    private var batterySymbol: some View {
-        let name = Self.symbolName(percent: percent, charging: isCharging)
-        if isCharging {
-            Image(systemName: name)
-                .symbolEffect(.pulse.byLayer, options: .repeating.speed(0.55), isActive: chargingPhase)
-        } else {
-            Image(systemName: name)
-        }
-    }
-
-    @ViewBuilder
-    private var batteryForeground: some View {
-        if isCharging {
-            batterySymbol
-                .foregroundStyle(.primary.opacity(0.35), Color.accentColor)
-        } else {
-            batterySymbol
-                .foregroundStyle(.primary.opacity(0.35), fillColor)
-        }
-    }
-
-    private var fillColor: Color {
-        switch percent {
-        case 21...100: .green
-        case 11...20: .orange
-        default: .red
-        }
-    }
-
-    private var percentColor: Color {
-        if isCharging { return .accentColor }
-        switch percent {
-        case 21...100: return .primary
-        case 11...20: return .orange
-        default: return .red
-        }
-    }
-
-    private var accessibilityText: String {
-        if isCharging {
-            return "Şarj oluyor, yüzde \(percent)"
-        }
-        return "Pil yüzde \(percent)"
-    }
-
-    private func updateChargingAnimation() {
-        chargingPhase = isCharging
-    }
-
-    static func symbolName(percent: Int, charging: Bool) -> String {
-        let level: String
-        switch max(0, min(100, percent)) {
-        case 95...100: level = "100"
-        case 85..<95: level = "100"
-        case 70..<85: level = "75"
-        case 55..<70: level = "75"
-        case 40..<55: level = "50"
-        case 25..<40: level = "50"
-        case 10..<25: level = "25"
-        default: level = "0"
-        }
-        if charging {
-            return "battery.\(level).bolt"
-        }
-        return "battery.\(level)"
+        .accessibilityLabel(isCharging ? "Şarj oluyor, yüzde \(percent)" : "Pil yüzde \(percent)")
     }
 }
 
-// MARK: - AirPods L / R / C row
+// MARK: - AirPods L / R / C
 
 struct AirPodsBatteryIndicatorView: View {
     let detailText: String
+    var chargingParts: Set<String> = []
     var style: BatteryIndicatorStyle = .standard
 
     private var components: [(label: String, percent: Int)] {
@@ -157,12 +172,12 @@ struct AirPodsBatteryIndicatorView: View {
             ForEach(Array(components.enumerated()), id: \.offset) { _, part in
                 HStack(spacing: 3) {
                     Text(part.label)
-                        .font(.caption2.weight(.medium))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                     BatteryIndicatorView(
                         percent: part.percent,
-                        style: .compact,
-                        showsPercentText: true
+                        isCharging: chargingParts.contains(part.label),
+                        style: .compact
                     )
                 }
             }
@@ -179,31 +194,22 @@ struct AirPodsBatteryIndicatorView: View {
                   let labelRange = Range(match.range(at: 1), in: text),
                   let valueRange = Range(match.range(at: 2), in: text),
                   let value = Int(text[valueRange]) else { return }
-            let label = String(text[labelRange])
-            let display: String
-            switch label {
-            case "L": display = "L"
-            case "R": display = "R"
-            case "C": display = "C"
-            default: display = label
-            }
-            results.append((display, value))
+            results.append((String(text[labelRange]), value))
         }
         return results
     }
 }
 
-// MARK: - Unknown battery
+// MARK: - Unknown
 
 struct BatteryUnknownIndicatorView: View {
     var style: BatteryIndicatorStyle = .standard
 
     var body: some View {
         HStack(spacing: style.spacing) {
-            Image(systemName: "battery.slash")
-                .font(style.iconFont)
+            Image(systemName: "minus.circle")
+                .font(.caption)
                 .foregroundStyle(.tertiary)
-                .symbolRenderingMode(.hierarchical)
             Text("—")
                 .font(style.percentFont)
                 .foregroundStyle(.tertiary)
@@ -211,33 +217,13 @@ struct BatteryUnknownIndicatorView: View {
     }
 }
 
-// MARK: - Menu bar label
-
-struct MenuBarBatteryLabel: View {
-    let symbolName: String
-    let isCharging: Bool
-
-    @State private var pulse = false
-
-    var body: some View {
-        Image(systemName: symbolName)
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(.primary, isCharging ? Color.accentColor : Color.green)
-            .symbolEffect(.pulse.byLayer, options: .repeating.speed(0.6), isActive: pulse && isCharging)
-            .onAppear { pulse = isCharging }
-            .onChange(of: isCharging) { _, charging in pulse = charging }
-    }
-}
-
-#Preview("Levels") {
-    VStack(alignment: .trailing, spacing: 12) {
-        BatteryIndicatorView(percent: 100, isCharging: true)
+#Preview {
+    VStack(alignment: .trailing, spacing: 14) {
         BatteryIndicatorView(percent: 50)
-        BatteryIndicatorView(percent: 20)
-        BatteryIndicatorView(percent: 8)
-        AirPodsBatteryIndicatorView(detailText: "L: 97% R: 94% C: 32%")
-        BatteryUnknownIndicatorView()
+        BatteryIndicatorView(percent: 15)
+        BatteryIndicatorView(percent: 72, isCharging: true)
+        AirPodsBatteryIndicatorView(detailText: "L: 97% R: 94% C: 32%", chargingParts: ["C"])
     }
     .padding()
-    .frame(width: 280)
+    .frame(width: 300)
 }

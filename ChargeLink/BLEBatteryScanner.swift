@@ -15,10 +15,11 @@ final class BLEBatteryScanner: NSObject {
 
     private let batteryServiceUUID = CBUUID(string: "180F")
     private let batteryLevelCharacteristicUUID = CBUUID(string: "2A19")
+    private let batteryPowerStateUUID = CBUUID(string: "2A1A")
 
     private var centralManager: CBCentralManager?
     private var peripheralDelegates: [UUID: BLEPeripheralBatteryDelegate] = [:]
-    private var readingsByName: [String: Int] = [:]
+    private var readingsByName: [String: BLEReading] = [:]
 
     private var poweredOnContinuation: CheckedContinuation<Void, Never>?
     private var scanContinuation: CheckedContinuation<Void, Never>?
@@ -36,7 +37,7 @@ final class BLEBatteryScanner: NSObject {
     }
 
     /// Refreshes BLE battery cache; call before merging with IOBluetooth device list.
-    func refresh() async -> [String: Int] {
+    func refresh() async -> [String: BLEReading] {
         ensureManager()
         await waitUntilPoweredOn()
 
@@ -72,7 +73,8 @@ final class BLEBatteryScanner: NSObject {
                 let delegate = BLEPeripheralBatteryDelegate(
                     scanner: self,
                     serviceUUID: batteryServiceUUID,
-                    levelUUID: batteryLevelCharacteristicUUID
+                    levelUUID: batteryLevelCharacteristicUUID,
+                    powerStateUUID: batteryPowerStateUUID
                 )
                 peripheralDelegates[peripheral.identifier] = delegate
                 peripheral.delegate = delegate
@@ -95,27 +97,45 @@ final class BLEBatteryScanner: NSObject {
         return readingsByName
     }
 
-    func allReadings() -> [String: Int] {
+    func allReadings() -> [String: BLEReading] {
         readingsByName
     }
 
     func percent(matchingDeviceName name: String) -> Int? {
+        reading(matchingDeviceName: name)?.percent
+    }
+
+    func reading(matchingDeviceName name: String) -> BLEReading? {
         let key = DeviceNameMatcher.normalize(name)
         if let direct = readingsByName[key] { return direct }
-        for (cachedName, percent) in readingsByName {
+        for (cachedName, reading) in readingsByName {
             if DeviceNameMatcher.matches(cachedName, target: key) || DeviceNameMatcher.matches(key, target: cachedName) {
-                return percent
+                return reading
             }
         }
         return nil
     }
 
-    fileprivate func storeReading(name: String?, percent: Int) {
+    fileprivate func storeReading(name: String?, percent: Int, isCharging: Bool = false) {
         guard (1...100).contains(percent) else { return }
         guard let name else { return }
         let key = DeviceNameMatcher.normalize(name)
-        readingsByName[key] = percent
-        BluetoothDebug.log("BLE: stored \(name) → \(percent)%")
+        if let existing = readingsByName[key] {
+            readingsByName[key] = BLEReading(percent: percent, isCharging: existing.isCharging || isCharging)
+        } else {
+            readingsByName[key] = BLEReading(percent: percent, isCharging: isCharging)
+        }
+        let stored = readingsByName[key]!
+        let chargeLabel = stored.isCharging ? " (charging)" : ""
+        BluetoothDebug.log("BLE: stored \(name) → \(stored.percent)%\(chargeLabel)")
+    }
+
+    fileprivate func markCharging(name: String?) {
+        guard let name else { return }
+        let key = DeviceNameMatcher.normalize(name)
+        if let existing = readingsByName[key] {
+            readingsByName[key] = BLEReading(percent: existing.percent, isCharging: true)
+        }
     }
 
     fileprivate func peripheralFinished(_ id: UUID) {
@@ -206,12 +226,15 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
     private weak var scanner: BLEBatteryScanner?
     private let serviceUUID: CBUUID
     private let levelUUID: CBUUID
+    private let powerStateUUID: CBUUID
     private var didComplete = false
+    private var pendingCharacteristics = 0
 
-    init(scanner: BLEBatteryScanner, serviceUUID: CBUUID, levelUUID: CBUUID) {
+    init(scanner: BLEBatteryScanner, serviceUUID: CBUUID, levelUUID: CBUUID, powerStateUUID: CBUUID) {
         self.scanner = scanner
         self.serviceUUID = serviceUUID
         self.levelUUID = levelUUID
+        self.powerStateUUID = powerStateUUID
     }
 
     func discoverBattery(on peripheral: CBPeripheral) {
@@ -228,10 +251,15 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
     }
 
     private func readBattery(from service: CBService, peripheral: CBPeripheral) {
-        if let characteristic = service.characteristics?.first(where: { $0.uuid == levelUUID }) {
+        let targets = [levelUUID, powerStateUUID]
+        let known = service.characteristics?.filter { targets.contains($0.uuid) } ?? []
+        if known.isEmpty {
+            peripheral.discoverCharacteristics(targets, for: service)
+            return
+        }
+        pendingCharacteristics = known.count
+        for characteristic in known {
             requestValue(for: characteristic, on: peripheral)
-        } else {
-            peripheral.discoverCharacteristics([levelUUID], for: service)
         }
     }
 
@@ -239,12 +267,28 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
         if characteristic.properties.contains(.notify) {
             peripheral.setNotifyValue(true, for: characteristic)
         }
-        if let data = characteristic.value, let percent = Self.parseBatteryData(data) {
+        if characteristic.uuid == levelUUID,
+           let data = characteristic.value,
+           let percent = Self.parseBatteryLevel(data) {
             scanner?.storeReading(name: peripheral.name, percent: percent)
-            complete(peripheral)
+            characteristicDone(peripheral)
+            return
+        }
+        if characteristic.uuid == powerStateUUID,
+           let data = characteristic.value,
+           Self.parseChargingState(data) {
+            scanner?.markCharging(name: peripheral.name)
+            characteristicDone(peripheral)
             return
         }
         peripheral.readValue(for: characteristic)
+    }
+
+    private func characteristicDone(_ peripheral: CBPeripheral) {
+        pendingCharacteristics = max(0, pendingCharacteristics - 1)
+        if pendingCharacteristics == 0 {
+            complete(peripheral)
+        }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -265,7 +309,7 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
                 }
             }
             for service in services where service.characteristics == nil {
-                peripheral.discoverCharacteristics([self.levelUUID], for: service)
+                peripheral.discoverCharacteristics([self.levelUUID, self.powerStateUUID], for: service)
                 return
             }
             self.complete(peripheral)
@@ -278,12 +322,21 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
         error: Error?
     ) {
         Task { @MainActor in
-            guard error == nil, peripheral.state == .connected,
-                  let characteristic = service.characteristics?.first(where: { $0.uuid == self.levelUUID }) else {
+            guard error == nil, peripheral.state == .connected else {
                 self.complete(peripheral)
                 return
             }
-            self.requestValue(for: characteristic, on: peripheral)
+            let targets = service.characteristics?.filter {
+                $0.uuid == self.levelUUID || $0.uuid == self.powerStateUUID
+            } ?? []
+            guard !targets.isEmpty else {
+                self.complete(peripheral)
+                return
+            }
+            self.pendingCharacteristics = targets.count
+            for characteristic in targets {
+                self.requestValue(for: characteristic, on: peripheral)
+            }
         }
     }
 
@@ -293,11 +346,18 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
         error: Error?
     ) {
         Task { @MainActor in
-            defer { self.complete(peripheral) }
-            guard error == nil, characteristic.uuid == self.levelUUID,
-                  let data = characteristic.value,
-                  let percent = Self.parseBatteryData(data) else { return }
-            self.scanner?.storeReading(name: peripheral.name, percent: percent)
+            guard error == nil, let data = characteristic.value else {
+                self.characteristicDone(peripheral)
+                return
+            }
+            if characteristic.uuid == self.levelUUID,
+               let percent = Self.parseBatteryLevel(data) {
+                self.scanner?.storeReading(name: peripheral.name, percent: percent)
+            } else if characteristic.uuid == self.powerStateUUID,
+                      Self.parseChargingState(data) {
+                self.scanner?.markCharging(name: peripheral.name)
+            }
+            self.characteristicDone(peripheral)
         }
     }
 
@@ -307,10 +367,16 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
         scanner?.peripheralFinished(peripheral.identifier)
     }
 
-    private static func parseBatteryData(_ data: Data) -> Int? {
+    private static func parseBatteryLevel(_ data: Data) -> Int? {
         guard let byte = data.first else { return nil }
         let value = Int(byte)
         guard (0...100).contains(value), value > 0 else { return nil }
         return value
+    }
+
+    /// Bluetooth Battery Power State — bit 6: Charge State.
+    private static func parseChargingState(_ data: Data) -> Bool {
+        guard let flags = data.first else { return false }
+        return (flags & 0x40) != 0
     }
 }

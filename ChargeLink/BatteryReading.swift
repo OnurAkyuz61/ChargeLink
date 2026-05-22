@@ -9,9 +9,22 @@ import Foundation
 struct BatteryReading: Equatable, Sendable {
     let percent: Int?
     let detailText: String?
+    let isCharging: Bool
     let source: String
 
-    static let unknown = BatteryReading(percent: nil, detailText: nil, source: "none")
+    init(
+        percent: Int?,
+        detailText: String?,
+        isCharging: Bool = false,
+        source: String
+    ) {
+        self.percent = percent
+        self.detailText = detailText
+        self.isCharging = isCharging
+        self.source = source
+    }
+
+    static let unknown = BatteryReading(percent: nil, detailText: nil, isCharging: false, source: "none")
 
     var hasValue: Bool {
         percent != nil || !(detailText?.isEmpty ?? true)
@@ -69,6 +82,7 @@ struct AirPodsBatteryComponents: Equatable, Sendable {
         return BatteryReading(
             percent: primaryPercent,
             detailText: detailText,
+            isCharging: false,
             source: source
         )
     }

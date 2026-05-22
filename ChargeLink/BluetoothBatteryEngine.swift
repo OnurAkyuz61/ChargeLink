@@ -89,12 +89,28 @@ enum BluetoothBatteryEngine {
         func store(_ key: String, _ reading: BatteryReading, replace: Bool = false) {
             let normalized = DeviceNameMatcher.normalize(key)
             guard !normalized.isEmpty else { return }
-            if !replace, let existing = merged[normalized], existing.hasValue { return }
+            if let existing = merged[normalized], existing.hasValue, !replace {
+                merged[normalized] = BatteryReading(
+                    percent: reading.percent ?? existing.percent,
+                    detailText: reading.detailText ?? existing.detailText,
+                    isCharging: existing.isCharging || reading.isCharging,
+                    source: existing.source
+                )
+                return
+            }
             merged[normalized] = reading
         }
 
-        for (name, percent) in BLEBatteryScanner.shared.allReadings() {
-            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "CoreBluetooth"))
+        for (name, ble) in BLEBatteryScanner.shared.allReadings() {
+            store(
+                name,
+                BatteryReading(
+                    percent: ble.percent,
+                    detailText: "\(ble.percent)%",
+                    isCharging: ble.isCharging,
+                    source: "CoreBluetooth"
+                )
+            )
         }
         // system_profiler first — same data as System Settings → Bluetooth (AirPods L/R/Case).
         for (key, info) in SystemBluetoothProfilerReader.fetchConnectedDeviceBatteries() {
@@ -176,7 +192,8 @@ enum BluetoothBatteryEngine {
         guard let percent = BLEBatteryScanner.shared.percent(matchingDeviceName: deviceName) else {
             return nil
         }
-        return BatteryReading(percent: percent, detailText: "\(percent)%", source: "CoreBluetooth-0x2A19")
+        let charging = BLEBatteryScanner.shared.reading(matchingDeviceName: deviceName)?.isCharging ?? false
+        return BatteryReading(percent: percent, detailText: "\(percent)%", isCharging: charging, source: "CoreBluetooth-0x2A19")
     }
 
     // MARK: - IORegistry (Apple / AirPods)

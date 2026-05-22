@@ -13,10 +13,11 @@ struct ProfilerBatteryInfo: Sendable {
     let percent: Int?
     let detailText: String?
     let address: String?
+    let isCharging: Bool
 
     func asBatteryReading(source: String = "system_profiler") -> BatteryReading? {
         guard percent != nil || !(detailText?.isEmpty ?? true) else { return nil }
-        return BatteryReading(percent: percent, detailText: detailText, source: source)
+        return BatteryReading(percent: percent, detailText: detailText, isCharging: isCharging, source: source)
     }
 }
 
@@ -107,6 +108,7 @@ enum SystemBluetoothProfilerReader {
         var right: Int?
         var caseBatt: Int?
         var single: Int?
+        var isCharging = false
 
         func flushDevice() {
             guard let deviceName = currentName else { return }
@@ -116,7 +118,8 @@ enum SystemBluetoothProfilerReader {
                 left: left,
                 right: right,
                 caseBatt: caseBatt,
-                single: single
+                single: single,
+                isCharging: isCharging
             )
             let nameKey = DeviceNameMatcher.normalize(deviceName)
             result[nameKey] = info
@@ -136,6 +139,7 @@ enum SystemBluetoothProfilerReader {
             right = nil
             caseBatt = nil
             single = nil
+            isCharging = false
         }
 
         for line in section.components(separatedBy: .newlines) {
@@ -160,6 +164,11 @@ enum SystemBluetoothProfilerReader {
                 case .caseBattery: caseBatt = value
                 case .single: single = value
                 }
+                continue
+            }
+
+            if parseChargingFlag(in: trimmed) {
+                isCharging = true
             }
         }
         flushDevice()
@@ -205,13 +214,27 @@ enum SystemBluetoothProfilerReader {
         return nil
     }
 
+    private static func parseChargingFlag(in line: String) -> Bool {
+        let lower = line.lowercased()
+        let prefixes = ["charging:", "is charging:", "şarj:", "power source:"]
+        for prefix in prefixes {
+            guard lower.hasPrefix(prefix) else { continue }
+            let value = lower.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+            if value.contains("yes") || value.contains("evet") || value.contains("ac") || value.contains("şarj") {
+                return true
+            }
+        }
+        return false
+    }
+
     private static func buildInfo(
         name: String,
         address: String?,
         left: Int?,
         right: Int?,
         caseBatt: Int?,
-        single: Int?
+        single: Int?,
+        isCharging: Bool
     ) -> ProfilerBatteryInfo {
         var parts: [String] = []
         if let left { parts.append("L: \(left)%") }
@@ -224,14 +247,20 @@ enum SystemBluetoothProfilerReader {
             return ProfilerBatteryInfo(
                 percent: primary,
                 detailText: parts.joined(separator: " "),
-                address: address
+                address: address,
+                isCharging: isCharging
             )
         }
 
         if let single {
-            return ProfilerBatteryInfo(percent: single, detailText: "\(single)%", address: address)
+            return ProfilerBatteryInfo(
+                percent: single,
+                detailText: "\(single)%",
+                address: address,
+                isCharging: isCharging
+            )
         }
 
-        return ProfilerBatteryInfo(percent: nil, detailText: nil, address: address)
+        return ProfilerBatteryInfo(percent: nil, detailText: nil, address: address, isCharging: isCharging)
     }
 }

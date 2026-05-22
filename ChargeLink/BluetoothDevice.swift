@@ -83,10 +83,4 @@ enum DeviceIcon {
         }
     }
 
-    static func menuBarSymbol(lowestBattery: Int?, isCharging: Bool = false) -> String {
-        guard let lowestBattery else {
-            return "bolt.horizontal.fill"
-        }
-        return BatteryIndicatorView.symbolName(percent: lowestBattery, charging: isCharging)
-    }
 }

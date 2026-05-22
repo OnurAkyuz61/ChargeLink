@@ -958,7 +958,7 @@ final class BluetoothManager {
                     address: address,
                     batteryPercent: reading.percent,
                     batteryDetailText: reading.detailText,
-                    isCharging: false,
+                    isCharging: reading.isCharging,
                     deviceClass: BluetoothDeviceClassMapper.deviceClass(for: ioDevice),
                     isConnected: true
                 )
