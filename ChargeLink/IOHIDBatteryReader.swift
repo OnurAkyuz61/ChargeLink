@@ -70,7 +70,9 @@ enum IOHIDBatteryReader {
 
     /// Reads battery via IOHIDDevice created from an `AppleUserHIDEventService` registry entry.
     static func batteryPercent(ioService: io_service_t) -> Int? {
-        let device = IOHIDDeviceCreate(kCFAllocatorDefault, ioService)
+        guard let device = IOHIDDeviceCreate(kCFAllocatorDefault, ioService) else {
+            return nil
+        }
         return readBatteryFromDevice(device)
     }
 
