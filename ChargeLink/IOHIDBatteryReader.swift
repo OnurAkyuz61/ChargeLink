@@ -13,6 +13,14 @@ import IOKit.hid
 // MARK: - IOHID live battery reader
 
 enum IOHIDBatteryReader {
+    /// HID usage pages / usages for battery reporting (public IOHIDUsageTables.h values).
+    private enum HIDBatteryUsage {
+        static let pageGenericDeviceControls = UInt32(kHIDPage_GenericDeviceControls)
+        static let pageBatterySystem = UInt32(kHIDPage_BatterySystem)
+        static let genDevControlsBatteryStrength = UInt32(kHIDUsage_GenDevControls_BatteryStrength)
+        static let bsRemainingCapacity = UInt32(kHIDUsage_BS_RemainingCapacity)
+    }
+
     private static let hidPropertyBatteryKeys = [
         "BatteryPercent",
         "BatteryLevel",
@@ -21,9 +29,9 @@ enum IOHIDBatteryReader {
         "AppleDeviceBatteryLevel",
     ]
     private static let batteryUsageMatchers: [(UInt32, UInt32?)] = [
-        (UInt32(kHIDPage_GenericDesktop), UInt32(kHIDUsage_GD_BatteryStrength)),
-        (UInt32(kHIDPage_BatterySystem), UInt32(kHIDUsage_BS_RemainingCapacity)),
-        (UInt32(kHIDPage_BatterySystem), nil),
+        (HIDBatteryUsage.pageGenericDeviceControls, HIDBatteryUsage.genDevControlsBatteryStrength),
+        (HIDBatteryUsage.pageBatterySystem, HIDBatteryUsage.bsRemainingCapacity),
+        (HIDBatteryUsage.pageBatterySystem, nil),
         (0xFF07, nil), // Logitech vendor page (also seen as 65347 in registry dumps)
         (0xFF43, nil),
         (65347, nil),
@@ -31,8 +39,6 @@ enum IOHIDBatteryReader {
 
     static func batteryPercent(productName: String) -> Int? {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard manager != nil else { return nil }
-        defer { _ = manager }
 
         IOHIDManagerSetDeviceMatching(manager, nil)
         guard IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
@@ -145,24 +151,25 @@ enum IOHIDBatteryReader {
     }
 
     private static func readElementValue(device: IOHIDDevice, element: IOHIDElement) -> Int? {
-        guard let value = IOHIDDeviceGetValue(device, element, IOOptionBits(kIOHIDOptionsTypeNone)) else {
+        var hidValue: IOHIDValue?
+        guard IOHIDDeviceGetValue(device, element, &hidValue) == kIOReturnSuccess,
+              let value = hidValue else {
             return nil
         }
-        defer { IOHIDValueUnscheduleRelease(value) }
 
         let intValue = IOHIDValueGetIntegerValue(value)
-        let min = IOHIDElementGetLogicalMin(element)
-        let max = IOHIDElementGetLogicalMax(element)
+        let logicalMin = IOHIDElementGetLogicalMin(element)
+        let logicalMax = IOHIDElementGetLogicalMax(element)
 
-        if max > min {
-            let range = Double(max - min)
-            let scaled = ((Double(intValue - min) / range) * 100).rounded()
+        if logicalMax > logicalMin {
+            let range = Double(logicalMax - logicalMin)
+            let scaled = ((Double(intValue - logicalMin) / range) * 100).rounded()
             let percent = Int(scaled)
             if (1...100).contains(percent) { return percent }
         }
 
-        if (1...100).contains(intValue) { return intValue }
-        if (1...9).contains(intValue) { return min(100, (intValue * 100) / 9) }
+        if (1...100).contains(intValue) { return Int(intValue) }
+        if (1...9).contains(intValue) { return Swift.min(100, (Int(intValue) * 100) / 9) }
 
         return nil
     }
@@ -175,8 +182,10 @@ enum IOHIDBatteryReader {
             guard let page = intValue(flattened["UsagePage"]),
                   let usage = intValue(flattened["Usage"]) else { continue }
 
-            let isBatteryPage = page == Int(kHIDPage_GenericDesktop) && usage == Int(kHIDUsage_GD_BatteryStrength)
-                || page == Int(kHIDPage_BatterySystem)
+            let isBatteryPage = (
+                page == Int(HIDBatteryUsage.pageGenericDeviceControls)
+                    && usage == Int(HIDBatteryUsage.genDevControlsBatteryStrength)
+            ) || page == Int(HIDBatteryUsage.pageBatterySystem)
                 || page == 0xFF07 || page == 65347 || page == 0xFF43
 
             guard isBatteryPage else { continue }
@@ -191,9 +200,9 @@ enum IOHIDBatteryReader {
                 }
             }
 
-            if let max = intValue(flattened["Max"]), (1...100).contains(max),
+            if let elementMax = intValue(flattened["Max"]), (1...100).contains(elementMax),
                let type = intValue(flattened["Type"]), type == 2 {
-                best = max(best ?? 0, max)
+                best = Swift.max(best ?? 0, elementMax)
             }
         }
         return best
