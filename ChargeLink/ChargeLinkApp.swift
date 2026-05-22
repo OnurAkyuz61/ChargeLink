@@ -14,6 +14,5 @@ struct ChargeLinkApp: App {
         WindowGroup {
             EmptyView()
         }
-        .defaultLaunchBehavior(.suppressed)
     }
 }

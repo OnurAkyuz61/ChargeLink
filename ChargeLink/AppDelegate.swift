@@ -25,9 +25,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        closeLaunchWindows()
         setupStatusItem()
         observeIconUpdates()
         updateStatusIcon()
+    }
+
+    /// Hides the placeholder `WindowGroup` on macOS 14 (no `.defaultLaunchBehavior(.suppressed)`).
+    private func closeLaunchWindows() {
+        for window in NSApp.windows {
+            window.orderOut(nil)
+            window.close()
+        }
     }
 
     // MARK: - Status item
