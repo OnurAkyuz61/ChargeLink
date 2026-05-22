@@ -41,28 +41,12 @@ enum IORegistryBatteryReader {
         "name",
     ]
 
-    static func batteryPercent(
-        for bluetoothDevice: IOBluetoothDevice,
-        name: String,
-        address: String
-    ) -> Int? {
-        if let direct = readBattery(from: bluetoothDevice) {
-            return direct
-        }
-
+    static func batteryPercent(name: String, address: String) -> Int? {
         if let fromMatching = searchBluetoothServices(address: address, name: name) {
             return fromMatching
         }
 
         return searchHIDBatteryServices(address: address, name: name)
-    }
-
-    // MARK: IOBluetoothDevice registry mirror
-
-    private static func readBattery(from device: IOBluetoothDevice) -> Int? {
-        guard let service = device.ioService() else { return nil }
-        defer { IOObjectRelease(service) }
-        return readBattery(fromRegistryEntry: service)
     }
 
     // MARK: IOService tree search
@@ -362,8 +346,8 @@ final class BluetoothManager {
     private(set) var isRefreshing = false
     private(set) var lastRefreshed: Date?
 
-    private nonisolated(unsafe) var pollTimer: Timer?
-    private nonisolated(unsafe) var notificationObservers: [NSObjectProtocol] = []
+    private nonisolated var pollTimer: Timer?
+    private nonisolated var notificationObservers: [NSObjectProtocol] = []
     private let pollInterval: TimeInterval = 45
 
     private init() {
@@ -407,18 +391,14 @@ final class BluetoothManager {
         var results: [BluetoothDevice] = []
         var seenAddresses = Set<String>()
 
-        for ioDevice in paired where ioDevice.isConnected {
+        for ioDevice in paired where ioDevice.isConnected() {
             let address = ioDevice.addressString ?? UUID().uuidString
             let normalizedAddress = BluetoothAddressNormalizer.normalize(address)
             guard !seenAddresses.contains(normalizedAddress) else { continue }
             seenAddresses.insert(normalizedAddress)
 
             let name = ioDevice.name ?? ioDevice.nameOrAddress ?? "Bluetooth Device"
-            let battery = IORegistryBatteryReader.batteryPercent(
-                for: ioDevice,
-                name: name,
-                address: address
-            )
+            let battery = IORegistryBatteryReader.batteryPercent(name: name, address: address)
 
             let device = BluetoothDevice(
                 id: normalizedAddress.isEmpty ? address : normalizedAddress,
@@ -426,7 +406,7 @@ final class BluetoothManager {
                 address: address,
                 batteryPercent: battery,
                 deviceClass: BluetoothDeviceClassMapper.deviceClass(for: ioDevice),
-                isConnected: ioDevice.isConnected
+                isConnected: ioDevice.isConnected()
             )
             results.append(device)
         }

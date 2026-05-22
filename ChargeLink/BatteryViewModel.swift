@@ -12,7 +12,7 @@ import Observation
 @Observable
 final class BatteryViewModel {
     private let manager: BluetoothManager
-    private nonisolated(unsafe) var updateObserver: NSObjectProtocol?
+    private nonisolated var updateObserver: NSObjectProtocol?
 
     private(set) var devices: [BluetoothDevice] = []
     private(set) var isRefreshing = false
