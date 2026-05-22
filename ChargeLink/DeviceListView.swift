@@ -188,6 +188,6 @@ private struct BatteryGaugeView: View {
 }
 
 #Preview {
-    DeviceListView(viewModel: BatteryViewModel())
+    DeviceListView(viewModel: BatteryViewModel(manager: BluetoothManager.shared))
         .padding()
 }

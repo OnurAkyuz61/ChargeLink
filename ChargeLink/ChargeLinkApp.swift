@@ -7,7 +7,7 @@ import SwiftUI
 
 @main
 struct ChargeLinkApp: App {
-    @State private var viewModel = BatteryViewModel()
+    @State private var viewModel = BatteryViewModel(manager: BluetoothManager.shared)
 
     var body: some Scene {
         MenuBarExtra {

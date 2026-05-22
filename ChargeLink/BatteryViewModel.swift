@@ -12,7 +12,7 @@ import Observation
 @Observable
 final class BatteryViewModel {
     private let manager: BluetoothManager
-    private var updateObserver: NSObjectProtocol?
+    private nonisolated(unsafe) var updateObserver: NSObjectProtocol?
 
     private(set) var devices: [BluetoothDevice] = []
     private(set) var isRefreshing = false
@@ -38,7 +38,7 @@ final class BatteryViewModel {
         return "Updated \(formatter.localizedString(for: lastRefreshed, relativeTo: Date()))"
     }
 
-    init(manager: BluetoothManager = .shared) {
+    init(manager: BluetoothManager) {
         self.manager = manager
         syncFromManager()
         updateObserver = NotificationCenter.default.addObserver(
@@ -46,13 +46,14 @@ final class BatteryViewModel {
             object: manager,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
-                self?.syncFromManager()
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.syncFromManager()
             }
         }
     }
 
-    deinit {
+    nonisolated deinit {
         if let updateObserver {
             NotificationCenter.default.removeObserver(updateObserver)
         }

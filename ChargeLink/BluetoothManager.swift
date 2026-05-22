@@ -362,8 +362,8 @@ final class BluetoothManager {
     private(set) var isRefreshing = false
     private(set) var lastRefreshed: Date?
 
-    private var pollTimer: Timer?
-    private var notificationObservers: [NSObjectProtocol] = []
+    private nonisolated(unsafe) var pollTimer: Timer?
+    private nonisolated(unsafe) var notificationObservers: [NSObjectProtocol] = []
     private let pollInterval: TimeInterval = 45
 
     private init() {
@@ -372,7 +372,7 @@ final class BluetoothManager {
         refresh()
     }
 
-    deinit {
+    nonisolated deinit {
         notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
         pollTimer?.invalidate()
     }
@@ -448,8 +448,9 @@ final class BluetoothManager {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in
-                    self?.refresh()
+                guard let self else { return }
+                MainActor.assumeIsolated {
+                    self.refresh()
                 }
             }
             notificationObservers.append(observer)
@@ -461,8 +462,9 @@ final class BluetoothManager {
     private func startPolling() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refresh()
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.refresh()
             }
         }
         if let pollTimer {
