@@ -468,13 +468,13 @@ enum BluetoothDeviceClassMapper {
 private final class BluetoothConnectionBridge: NSObject {
     var onConnectionChange: (@MainActor () -> Void)?
 
-    @objc func deviceConnected(notification: IOBluetoothUserNotification) {
-        BluetoothDebug.log("IOBluetooth connect notification received")
+    @objc func deviceConnected(notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+        BluetoothDebug.log("IOBluetooth connect: \(device.name ?? device.nameOrAddress ?? "device")")
         dispatchRefresh()
     }
 
-    @objc func deviceDisconnected(notification: IOBluetoothUserNotification) {
-        BluetoothDebug.log("IOBluetooth disconnect notification received")
+    @objc func deviceDisconnected(notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+        BluetoothDebug.log("IOBluetooth disconnect: \(device.name ?? device.nameOrAddress ?? "device")")
         dispatchRefresh()
     }
 
@@ -498,20 +498,14 @@ private final class BluetoothRuntimeResources {
     init(pollInterval: TimeInterval, onRefresh: @escaping @MainActor () -> Void) {
         connectionBridge.onConnectionChange = onRefresh
 
-        ioBluetoothNotifications.append(
-            IOBluetoothDevice.register(
-                forConnectNotifications: connectionBridge,
-                selector: #selector(BluetoothConnectionBridge.deviceConnected(notification:)),
-                ofClass: nil
-            )
-        )
-        ioBluetoothNotifications.append(
-            IOBluetoothDevice.register(
-                forDisconnectNotifications: connectionBridge,
-                selector: #selector(BluetoothConnectionBridge.deviceDisconnected(notification:)),
-                ofClass: nil
-            )
-        )
+        if let connectNotification = IOBluetoothDevice.register(
+            forConnectNotifications: connectionBridge,
+            selector: #selector(BluetoothConnectionBridge.deviceConnected(notification:device:))
+        ) {
+            ioBluetoothNotifications.append(connectNotification)
+        }
+
+        registerDisconnectNotifications(for: connectionBridge)
 
         let notificationNames = [
             kIOBluetoothDeviceNotificationNameConnected,
@@ -552,6 +546,26 @@ private final class BluetoothRuntimeResources {
         ioBluetoothNotifications.forEach { $0.unregister() }
         notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
         pollTimer?.invalidate()
+    }
+
+    /// Disconnect notifications are per-device instance methods on `IOBluetoothDevice`.
+    private func registerDisconnectNotifications(for bridge: BluetoothConnectionBridge) {
+        let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
+        let recent = IOBluetoothDevice.recentDevices(32) as? [IOBluetoothDevice] ?? []
+        var seenAddresses = Set<String>()
+
+        for device in paired + recent {
+            let key = device.addressString ?? "\(ObjectIdentifier(device))"
+            guard seenAddresses.insert(key).inserted else { continue }
+
+            let notification = device.registerForDisconnectNotification(
+                bridge,
+                selector: #selector(BluetoothConnectionBridge.deviceDisconnected(notification:device:))
+            )
+            ioBluetoothNotifications.append(notification)
+        }
+
+        BluetoothDebug.log("Registered disconnect notifications for \(seenAddresses.count) device(s)")
     }
 }
 
