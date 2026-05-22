@@ -142,17 +142,19 @@ enum LogitechHIDPPBatteryReader {
         var map: [UInt16: UInt8] = [:]
 
         for index in 0..<count {
+            guard index <= Int(UInt8.max) else { continue }
+            let featureIndex = UInt8(index)
             let requestID = (UInt16(featureSetIndex) << 8) | 0x10
             guard let reply = sendRequest(
                 device: device,
                 devIndex: devIndex,
                 requestID: requestID,
-                params: [index],
+                params: [featureIndex],
                 reportLength: reportLength
             ), reply.count >= 2 else { continue }
 
             let featureID = UInt16(reply[0]) << 8 | UInt16(reply[1])
-            map[featureID] = index
+            map[featureID] = featureIndex
         }
         return map.isEmpty ? nil : map
     }
