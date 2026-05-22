@@ -30,7 +30,17 @@ enum DeviceNameMatcher {
         let overlap = aTokens.filter { token in
             bTokens.contains { $0.contains(token) || token.contains($0) }
         }
-        return overlap.count >= max(1, min(aTokens.count, bTokens.count) / 2)
+        if overlap.count >= max(1, min(aTokens.count, bTokens.count) / 2) {
+            return true
+        }
+        // IOBluetooth "AirPods Pro" vs system_profiler "Onur (AirPods Pro)"
+        if aTokens.allSatisfy({ token in bTokens.contains { $0.contains(token) || token.contains($0) } }) {
+            return true
+        }
+        if bTokens.allSatisfy({ token in aTokens.contains { $0.contains(token) || token.contains($0) } }) {
+            return true
+        }
+        return false
     }
 
     static func tokens(from name: String) -> [String] {
@@ -86,20 +96,23 @@ enum BluetoothBatteryEngine {
         for (name, percent) in BLEBatteryScanner.shared.allReadings() {
             store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "CoreBluetooth"))
         }
+        // system_profiler first — same data as System Settings → Bluetooth (AirPods L/R/Case).
+        for (key, info) in SystemBluetoothProfilerReader.fetchConnectedDeviceBatteries() {
+            if let reading = info.asBatteryReading() {
+                store(key, reading, replace: true)
+            }
+        }
+        for (name, percent) in IORegistryBatteryReader.registryOnlyBatteriesFromEventServices() {
+            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "IORegistry-HIDEvent"))
+        }
+        for (name, percent) in IORegistryBatteryReader.allProductBatteries() {
+            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "IORegistry"))
+        }
         for (name, percent) in IOHIDBatteryReader.allProductBatteries() {
             store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "IOHID"))
         }
         for (name, percent) in IOHIDBatteryReader.batteriesFromUserHIDEventServices() {
             store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "HID-EventService"))
-        }
-        for (name, percent) in IORegistryBatteryReader.allProductBatteries() {
-            store(name, BatteryReading(percent: percent, detailText: "\(percent)%", source: "IORegistry"))
-        }
-        // Same source macOS Bluetooth settings uses for AirPods battery text.
-        for (key, info) in SystemBluetoothProfilerReader.fetchConnectedDeviceBatteries() {
-            if let reading = info.asBatteryReading() {
-                store(key, reading, replace: true)
-            }
         }
 
         mergedReadingsByKey = merged

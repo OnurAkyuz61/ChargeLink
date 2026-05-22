@@ -23,19 +23,48 @@ struct ProfilerBatteryInfo: Sendable {
 enum SystemBluetoothProfilerReader {
     private static let profilerPath = "/usr/sbin/system_profiler"
 
+    private static let connectedSectionMarkers = ["Connected:", "Bağlı:", "Bagli:"]
+    private static let disconnectedSectionMarkers = ["Not Connected:", "Bağlı Değil:", "Bagli Degil:"]
+
+    private static let addressPrefixes = ["Address:", "Adres:"]
+    private static let batteryPrefixes: [(key: String, part: BatteryPart)] = [
+        ("Left Battery Level:", .left),
+        ("Sol Pil Seviyesi:", .left),
+        ("Right Battery Level:", .right),
+        ("Sağ Pil Seviyesi:", .right),
+        ("Case Battery Level:", .caseBattery),
+        ("Kutu Pil Seviyesi:", .caseBattery),
+        ("Battery Level:", .single),
+        ("Pil Seviyesi:", .single),
+    ]
+
+    private enum BatteryPart {
+        case left, right, caseBattery, single
+    }
+
     /// Product name (normalized) or Bluetooth address → battery info.
     static func fetchConnectedDeviceBatteries() -> [String: ProfilerBatteryInfo] {
         guard let output = runProfiler() else {
-            BluetoothDebug.log("system_profiler: no output")
+            BluetoothDebug.log("system_profiler: no output (sandbox may block Process — check entitlements)")
             return [:]
         }
-        return parse(output)
+        BluetoothDebug.log("system_profiler: received \(output.count) characters")
+        let parsed = parse(output)
+        if parsed.isEmpty {
+            BluetoothDebug.log("system_profiler: parse produced 0 devices — preview:\n\(output.prefix(400))")
+        }
+        return parsed
     }
 
     private static func runProfiler() -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: profilerPath)
         process.arguments = ["SPBluetoothDataType"]
+        process.environment = [
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "PATH": "/usr/sbin:/usr/bin:/bin:/sbin",
+        ]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -49,20 +78,26 @@ enum SystemBluetoothProfilerReader {
             return nil
         }
 
-        guard process.terminationStatus == 0 else {
-            BluetoothDebug.log("system_profiler exit \(process.terminationStatus)")
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
+            BluetoothDebug.log("system_profiler exit \(process.terminationStatus), empty stdout")
             return nil
         }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
+        if process.terminationStatus != 0 {
+            BluetoothDebug.log("system_profiler exit \(process.terminationStatus) (using stdout anyway)")
+        }
+        return text
     }
 
     static func parse(_ text: String) -> [String: ProfilerBatteryInfo] {
-        guard let connectedRange = text.range(of: "Connected:") else { return [:] }
+        guard let connectedMarker = connectedSectionMarkers.first(where: { text.contains($0) }),
+              let connectedRange = text.range(of: connectedMarker) else {
+            BluetoothDebug.log("system_profiler: no connected section marker found")
+            return [:]
+        }
         var section = String(text[connectedRange.upperBound...])
-        if let notConnected = section.range(of: "Not Connected:") {
-            section = String(section[..<notConnected.lowerBound])
+        if let endMarker = disconnectedSectionMarkers.compactMap({ section.range(of: $0) }).first {
+            section = String(section[..<endMarker.lowerBound])
         }
 
         var result: [String: ProfilerBatteryInfo] = [:]
@@ -85,6 +120,9 @@ enum SystemBluetoothProfilerReader {
             )
             let nameKey = DeviceNameMatcher.normalize(deviceName)
             result[nameKey] = info
+            if let shortName = parentheticalDeviceName(from: deviceName) {
+                result[DeviceNameMatcher.normalize(shortName)] = info
+            }
             if let currentAddress {
                 let addrKey = BluetoothAddressNormalizer.normalize(currentAddress)
                 if !addrKey.isEmpty {
@@ -110,24 +148,32 @@ enum SystemBluetoothProfilerReader {
                 continue
             }
 
-            if let address = propertyValue(prefix: "Address:", in: trimmed) {
+            if let address = firstPropertyValue(in: trimmed, prefixes: addressPrefixes) {
                 currentAddress = address
                 continue
             }
 
-            if let value = batteryValue(prefix: "Left Battery Level:", in: trimmed) {
-                left = value
-            } else if let value = batteryValue(prefix: "Right Battery Level:", in: trimmed) {
-                right = value
-            } else if let value = batteryValue(prefix: "Case Battery Level:", in: trimmed) {
-                caseBatt = value
-            } else if let value = batteryValue(prefix: "Battery Level:", in: trimmed) {
-                single = value
+            if let (value, part) = firstBatteryValue(in: trimmed) {
+                switch part {
+                case .left: left = value
+                case .right: right = value
+                case .caseBattery: caseBatt = value
+                case .single: single = value
+                }
             }
         }
         flushDevice()
 
         return result
+    }
+
+    /// e.g. `Onur (AirPods Pro)` → `AirPods Pro` for IOBluetooth name matching.
+    private static func parentheticalDeviceName(from name: String) -> String? {
+        guard let open = name.lastIndex(of: "("), let close = name.lastIndex(of: ")"), close > open else {
+            return nil
+        }
+        let inner = name[name.index(after: open)..<close].trimmingCharacters(in: .whitespaces)
+        return inner.isEmpty ? nil : String(inner)
     }
 
     private static func deviceName(from line: String) -> String? {
@@ -140,16 +186,23 @@ enum SystemBluetoothProfilerReader {
         return name
     }
 
-    private static func propertyValue(prefix: String, in line: String) -> String? {
-        guard line.hasPrefix(prefix) else { return nil }
-        return line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+    private static func firstPropertyValue(in line: String, prefixes: [String]) -> String? {
+        for prefix in prefixes {
+            guard line.hasPrefix(prefix) else { continue }
+            return line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+        }
+        return nil
     }
 
-    private static func batteryValue(prefix: String, in line: String) -> Int? {
-        guard let raw = propertyValue(prefix: prefix, in: line) else { return nil }
-        let digits = raw.filter(\.isNumber)
-        guard let value = Int(digits), (1...100).contains(value) else { return nil }
-        return value
+    private static func firstBatteryValue(in line: String) -> (Int, BatteryPart)? {
+        for entry in batteryPrefixes {
+            guard line.hasPrefix(entry.key) else { continue }
+            let raw = line.dropFirst(entry.key.count).trimmingCharacters(in: .whitespaces)
+            let digits = raw.filter(\.isNumber)
+            guard let value = Int(digits), (1...100).contains(value) else { continue }
+            return (value, entry.part)
+        }
+        return nil
     }
 
     private static func buildInfo(

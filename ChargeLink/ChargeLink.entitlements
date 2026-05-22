@@ -10,5 +10,10 @@
 	<true/>
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
+	<key>com.apple.security.temporary-exception.iokit-user-client-class</key>
+	<array>
+		<string>IOHIDLibUserClient</string>
+		<string>IOHIDEventServiceUserClient</string>
+	</array>
 </dict>
 </plist>

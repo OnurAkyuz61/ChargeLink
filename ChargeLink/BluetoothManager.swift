@@ -115,6 +115,41 @@ enum IORegistryBatteryReader {
         return map
     }
 
+    /// Reads `BatteryPercent` from registry only (no `IOHIDDeviceOpen` — works when sandbox blocks HID).
+    static func registryOnlyBatteriesFromEventServices() -> [String: Int] {
+        var map: [String: Int] = [:]
+
+        for className in hidEventServiceClasses {
+            guard let matching = IOServiceMatching(className) else { continue }
+            var iterator: io_iterator_t = 0
+            guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+                continue
+            }
+            defer { IOObjectRelease(iterator) }
+
+            while case let entry = IOIteratorNext(iterator), entry != 0 {
+                defer { IOObjectRelease(entry) }
+                guard let props = copyProperties(for: entry) else { continue }
+                let names = namePropertyKeys.compactMap { props[$0] as? String }.filter { !$0.isEmpty }
+                guard !names.isEmpty else { continue }
+
+                var candidates: [BatteryCandidate] = []
+                if let percent = readDirectBatteryProperty(on: entry) {
+                    candidates.append(BatteryCandidate(percent: percent, priority: 0, source: "\(className).registry"))
+                }
+                collectBatteryPercentKeys(entry: entry, depth: 0, into: &candidates, path: className)
+
+                guard let best = BatteryCandidate.selectBest(from: candidates) else { continue }
+                for name in names {
+                    let key = DeviceNameMatcher.normalize(name)
+                    map[key] = Swift.max(map[key] ?? 0, best.percent)
+                    BluetoothDebug.log("IORegistry-only: \(name) → \(best.percent)%")
+                }
+            }
+        }
+        return map
+    }
+
     /// Scans Apple HID event driver services where macOS publishes `BatteryPercent` for BT peripherals.
     static func batteryFromHIDEventServices(name: String, address: String) -> Int? {
         var candidates: [BatteryCandidate] = []
