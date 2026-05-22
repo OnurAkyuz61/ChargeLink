@@ -13,6 +13,8 @@ struct BluetoothDevice: Identifiable, Equatable, Sendable {
     let batteryPercent: Int?
     /// Multi-part display (e.g. AirPods `L: 39% R: 56%`); falls back to `batteryPercent`.
     let batteryDetailText: String?
+    /// When true, shows `battery.*.bolt` with pulse animation (if detected later).
+    let isCharging: Bool
     let deviceClass: DeviceClass
     let isConnected: Bool
 
@@ -81,21 +83,10 @@ enum DeviceIcon {
         }
     }
 
-    static func menuBarSymbol(lowestBattery: Int?) -> String {
+    static func menuBarSymbol(lowestBattery: Int?, isCharging: Bool = false) -> String {
         guard let lowestBattery else {
             return "bolt.horizontal.fill"
         }
-        switch lowestBattery {
-        case 81...100:
-            return "battery.100.bolt"
-        case 61...80:
-            return "battery.75.bolt"
-        case 41...60:
-            return "battery.50.bolt"
-        case 21...40:
-            return "battery.25.bolt"
-        default:
-            return "battery.0.bolt"
-        }
+        return BatteryIndicatorView.symbolName(percent: lowestBattery, charging: isCharging)
     }
 }

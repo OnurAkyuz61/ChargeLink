@@ -199,65 +199,16 @@ private struct DeviceRowView: View {
 
     @ViewBuilder
     private var batteryLabel: some View {
-        if device.showsMultiPartBattery {
-            Text(device.batteryDisplay)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.trailing)
-                .lineLimit(2)
+        if device.showsMultiPartBattery, let detail = device.batteryDetailText {
+            AirPodsBatteryIndicatorView(detailText: detail)
         } else if let percent = device.batteryPercent {
-            HStack(spacing: 6) {
-                BatteryGaugeView(percent: percent)
-                Text("\(percent)%")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(color(for: percent))
-            }
+            BatteryIndicatorView(
+                percent: percent,
+                isCharging: device.isCharging,
+                style: .standard
+            )
         } else {
-            Text("—")
-                .font(.subheadline)
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    private func color(for percent: Int) -> Color {
-        switch percent {
-        case 21...100:
-            return .primary
-        case 11...20:
-            return .orange
-        default:
-            return .red
-        }
-    }
-}
-
-// MARK: - Battery Gauge
-
-private struct BatteryGaugeView: View {
-    let percent: Int
-
-    var body: some View {
-        Image(systemName: gaugeSymbol)
-            .font(.caption)
-            .foregroundStyle(gaugeColor)
-            .symbolRenderingMode(.palette)
-    }
-
-    private var gaugeSymbol: String {
-        switch percent {
-        case 81...100: return "battery.100"
-        case 61...80: return "battery.75"
-        case 41...60: return "battery.50"
-        case 21...40: return "battery.25"
-        default: return "battery.0"
-        }
-    }
-
-    private var gaugeColor: Color {
-        switch percent {
-        case 21...100: return .green
-        case 11...20: return .orange
-        default: return .red
+            BatteryUnknownIndicatorView(style: .standard)
         }
     }
 }

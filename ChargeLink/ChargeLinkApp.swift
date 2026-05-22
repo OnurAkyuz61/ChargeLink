@@ -14,8 +14,10 @@ struct ChargeLinkApp: App {
         MenuBarExtra {
             DeviceListView(viewModel: viewModel)
         } label: {
-            Image(systemName: viewModel.menuBarSymbolName)
-                .symbolRenderingMode(.hierarchical)
+            MenuBarBatteryLabel(
+                symbolName: viewModel.menuBarSymbolName,
+                isCharging: viewModel.anyDeviceCharging
+            )
         }
         .menuBarExtraStyle(.window)
     }

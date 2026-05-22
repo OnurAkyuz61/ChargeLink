@@ -62,7 +62,11 @@ final class BatteryViewModel {
     private(set) var lastRefreshed: Date?
 
     var menuBarSymbolName: String {
-        DeviceIcon.menuBarSymbol(lowestBattery: lowestBatteryPercent)
+        DeviceIcon.menuBarSymbol(lowestBattery: lowestBatteryPercent, isCharging: anyDeviceCharging)
+    }
+
+    var anyDeviceCharging: Bool {
+        devices.contains { $0.isCharging }
     }
 
     var isEmpty: Bool {
