@@ -151,11 +151,12 @@ enum IOHIDBatteryReader {
     }
 
     private static func readElementValue(device: IOHIDDevice, element: IOHIDElement) -> Int? {
-        var hidValue: IOHIDValue?
-        guard IOHIDDeviceGetValue(device, element, &hidValue) == kIOReturnSuccess,
-              let value = hidValue else {
+        var hidValueOut: Unmanaged<IOHIDValue>?
+        guard IOHIDDeviceGetValue(device, element, &hidValueOut) == kIOReturnSuccess,
+              let unmanaged = hidValueOut else {
             return nil
         }
+        let value = unmanaged.takeRetainedValue()
 
         let intValue = IOHIDValueGetIntegerValue(value)
         let logicalMin = IOHIDElementGetLogicalMin(element)
