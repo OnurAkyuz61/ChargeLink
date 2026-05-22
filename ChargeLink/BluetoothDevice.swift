@@ -11,6 +11,8 @@ struct BluetoothDevice: Identifiable, Equatable, Sendable {
     let name: String
     let address: String
     let batteryPercent: Int?
+    /// Multi-part display (e.g. AirPods `L: 39% R: 56%`); falls back to `batteryPercent`.
+    let batteryDetailText: String?
     let deviceClass: DeviceClass
     let isConnected: Bool
 
@@ -32,12 +34,20 @@ struct BluetoothDevice: Identifiable, Equatable, Sendable {
     }
 
     var batteryDisplay: String {
+        if let batteryDetailText, !batteryDetailText.isEmpty {
+            return batteryDetailText
+        }
         guard let batteryPercent else { return "—" }
         return "\(batteryPercent)%"
     }
 
     var hasBatteryReading: Bool {
-        batteryPercent != nil
+        batteryPercent != nil || !(batteryDetailText?.isEmpty ?? true)
+    }
+
+    var showsMultiPartBattery: Bool {
+        guard let batteryDetailText else { return false }
+        return batteryDetailText.contains("L:") || batteryDetailText.contains("R:") || batteryDetailText.contains("C:")
     }
 
     var symbolName: String {

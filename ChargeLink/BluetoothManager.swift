@@ -34,6 +34,7 @@ enum IORegistryBatteryReader {
         "BatteryPercent",
         "BatteryLevel",
         "AppleDeviceBatteryLevel",
+        "AppleRawDeviceBatteryLevel",
         "BatteryPercentLeft",
         "BatteryPercentRight",
         "BatteryPercentCase",
@@ -47,12 +48,17 @@ enum IORegistryBatteryReader {
         kIODeviceTreePlane,
     ]
 
+    private static let hidEventServiceClasses = [
+        "AppleDeviceManagementHIDEventService",
+        "AppleUserHIDEventService",
+        "AppleBluetoothHIDDevice",
+        "AppleHSBluetoothDevice",
+        "IOHIDEventService",
+    ]
+
     private static let hidServiceClasses = [
         "IOHIDDevice",
-        "IOHIDEventService",
-        "AppleDeviceManagementHIDEventService",
-        "AppleBluetoothHIDDevice",
-    ]
+    ] + hidEventServiceClasses
 
     private static let addressPropertyKeys = [
         "DeviceAddress",
@@ -71,6 +77,24 @@ enum IORegistryBatteryReader {
     ]
 
     // MARK: - Public API
+
+    /// Scans Apple HID event driver services where macOS publishes `BatteryPercent` for BT peripherals.
+    static func batteryFromHIDEventServices(name: String, address: String) -> Int? {
+        var candidates: [BatteryCandidate] = []
+
+        for className in hidEventServiceClasses {
+            enumerateMatchingServices(className: className, name: name, address: address) { entry in
+                if let percent = readDirectBatteryProperty(on: entry) {
+                    candidates.append(
+                        BatteryCandidate(percent: percent, priority: 0, source: "\(className).BatteryPercent")
+                    )
+                }
+                collectBatteryPercentKeys(entry: entry, depth: 0, into: &candidates, path: className)
+            }
+        }
+
+        return BatteryCandidate.selectBest(from: candidates)?.percent
+    }
 
     static func batteryPercent(name: String, address: String) -> Int? {
         BluetoothDebug.log("IORegistry multi-strategy search for '\(name)' @ \(address)")
@@ -153,6 +177,17 @@ enum IORegistryBatteryReader {
         address: String,
         into candidates: inout [BatteryCandidate]
     ) {
+        enumerateMatchingServices(className: className, name: name, address: address) { entry in
+            collectFromEntry(entry, depth: 0, into: &candidates, path: className)
+        }
+    }
+
+    private static func enumerateMatchingServices(
+        className: String,
+        name: String,
+        address: String,
+        handler: (io_registry_entry_t) -> Void
+    ) {
         guard let matching = IOServiceMatching(className) else { return }
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
@@ -163,7 +198,58 @@ enum IORegistryBatteryReader {
         while case let entry = IOIteratorNext(iterator), entry != 0 {
             defer { IOObjectRelease(entry) }
             guard entryMatchesDevice(entry: entry, address: address, name: name) else { continue }
-            collectFromEntry(entry, depth: 0, into: &candidates, path: className)
+            handler(entry)
+        }
+    }
+
+    private static func readDirectBatteryProperty(on entry: io_registry_entry_t) -> Int? {
+        for key in batteryKeys {
+            guard let value = copyProperty(key, from: entry) else { continue }
+            if let percent = BatteryValueNormalizer.primaryPercent(from: value, key: key) {
+                return percent
+            }
+        }
+        return nil
+    }
+
+    private static func copyProperty(_ key: String, from entry: io_registry_entry_t) -> Any? {
+        let cfKey = key as CFString
+        guard let value = IORegistryEntryCreateCFProperty(entry, cfKey, kCFAllocatorDefault, 0)?.takeRetainedValue() else {
+            return nil
+        }
+        return value
+    }
+
+    /// Recursively finds any `BatteryPercent` / `BatteryLevel` key on child nodes.
+    private static func collectBatteryPercentKeys(
+        entry: io_registry_entry_t,
+        depth: Int,
+        into candidates: inout [BatteryCandidate],
+        path: String
+    ) {
+        guard depth <= maxSearchDepth else { return }
+
+        if let properties = copyProperties(for: entry) {
+            for (key, value) in properties {
+                let lower = key.lowercased()
+                guard lower.contains("battery") else { continue }
+                if let percent = BatteryValueNormalizer.primaryPercent(from: value, key: key)
+                    ?? BatteryValueNormalizer.primaryPercent(from: value, key: "BatteryPercent") {
+                    candidates.append(
+                        BatteryCandidate(percent: percent, priority: 4, source: "\(path).\(key)")
+                    )
+                }
+            }
+        }
+
+        for plane in registryPlanes {
+            var childIterator: io_iterator_t = 0
+            guard IORegistryEntryGetChildIterator(entry, plane, &childIterator) == KERN_SUCCESS else { continue }
+            defer { IOObjectRelease(childIterator) }
+            while case let child = IOIteratorNext(childIterator), child != 0 {
+                collectBatteryPercentKeys(entry: child, depth: depth + 1, into: &candidates, path: path)
+                IOObjectRelease(child)
+            }
         }
     }
 
@@ -422,7 +508,8 @@ enum BatteryValueNormalizer {
         guard let raw = extractInt(from: value) else { return nil }
 
         switch key {
-        case "BatteryPercent", "BatteryPercentLeft", "BatteryPercentRight", "BatteryPercentCase":
+        case "BatteryPercent", "BatteryPercentLeft", "BatteryPercentRight", "BatteryPercentCase",
+             "AppleRawDeviceBatteryLevel":
             guard (1...100).contains(raw) else { return nil }
             return raw
 
@@ -437,9 +524,15 @@ enum BatteryValueNormalizer {
             return nil
 
         default:
-            guard (1...100).contains(raw) else { return nil }
-            return raw
+            guard key.lowercased().contains("battery"), raw > 0 else { return nil }
+            if (1...100).contains(raw) { return raw }
+            if (1...9).contains(raw) { return clamp((raw * 100) / 9) }
+            return nil
         }
+    }
+
+    static func primaryPercent(from value: Any, key: String) -> Int? {
+        percent(from: value, key: key)
     }
 
     static func priority(for key: String) -> Int {
@@ -447,7 +540,7 @@ enum BatteryValueNormalizer {
         case "BatteryPercent": return 1
         case "BatteryPercentLeft", "BatteryPercentRight": return 2
         case "BatteryPercentCase": return 3
-        case "AppleDeviceBatteryLevel": return 4
+        case "AppleDeviceBatteryLevel", "AppleRawDeviceBatteryLevel": return 4
         case "BatteryLevel": return 5
         default: return 6
         }
@@ -713,7 +806,7 @@ final class BluetoothManager {
     private let pollInterval: TimeInterval = 30
 
     private init() {
-        BluetoothPermissionManager.shared.requestAccessIfNeeded()
+        BLEBatteryScanner.shared.ensureManager()
         runtime = BluetoothRuntimeResources(pollInterval: pollInterval) { [weak self] in
             Task { @MainActor in
                 await self?.refreshDevices()
@@ -734,6 +827,7 @@ final class BluetoothManager {
         defer { isRefreshing = false }
         BluetoothDebug.log("refreshDevices() started")
 
+        await BluetoothBatteryEngine.refreshBLECache()
         let discovered = fetchConnectedDevices()
         devices = discovered.sorted { lhs, rhs in
             if lhs.hasBatteryReading != rhs.hasBatteryReading {
@@ -782,15 +876,16 @@ final class BluetoothManager {
             let id = normalizedAddress.isEmpty ? address : normalizedAddress
             guard seenIDs.insert(id).inserted else { continue }
 
-            let battery = IORegistryBatteryReader.batteryPercent(name: name, address: address)
-            BluetoothDebug.log("    battery: \(battery.map { "\($0)%" } ?? "unknown (—)")")
+            let reading = BluetoothBatteryEngine.resolveBattery(name: name, address: address)
+            BluetoothDebug.log("    battery: \(reading.displayText) [\(reading.source)]")
 
             results.append(
                 BluetoothDevice(
                     id: id,
                     name: name,
                     address: address,
-                    batteryPercent: battery,
+                    batteryPercent: reading.percent,
+                    batteryDetailText: reading.detailText,
                     deviceClass: BluetoothDeviceClassMapper.deviceClass(for: ioDevice),
                     isConnected: true
                 )

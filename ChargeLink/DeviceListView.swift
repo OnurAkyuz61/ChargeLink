@@ -199,7 +199,13 @@ private struct DeviceRowView: View {
 
     @ViewBuilder
     private var batteryLabel: some View {
-        if let percent = device.batteryPercent {
+        if device.showsMultiPartBattery {
+            Text(device.batteryDisplay)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+        } else if let percent = device.batteryPercent {
             HStack(spacing: 6) {
                 BatteryGaugeView(percent: percent)
                 Text("\(percent)%")
