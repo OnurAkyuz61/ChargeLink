@@ -63,9 +63,13 @@ struct DeviceListView: View {
             Image(systemName: "antenna.radiowaves.left.and.right.slash")
                 .font(.title2)
                 .foregroundStyle(.secondary)
-            Text("No connected Bluetooth devices")
+            Text("No Bluetooth devices found")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Text("Check System Settings → Privacy & Security → Bluetooth, then tap Refresh.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -114,14 +118,22 @@ private struct DeviceRowView: View {
                 .frame(width: 22, alignment: .center)
                 .symbolRenderingMode(.hierarchical)
 
-            Text(device.displayName)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(device.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if !device.isConnected {
+                    Text("Not connected")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             Spacer(minLength: 8)
 
             batteryLabel
         }
+        .opacity(device.isConnected ? 1 : 0.55)
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .accessibilityElement(children: .combine)
