@@ -307,9 +307,9 @@ enum LogitechHIDPPBatteryReader {
         }
 
         let reportID = CFIndex(report[0])
-        var sent = report
+        let sent = report
 
-        let setTypes: [IOHIDReportType] = [.feature, .output]
+        let setTypes: [IOHIDReportType] = [kIOHIDReportTypeFeature, kIOHIDReportTypeOutput]
         var setOK = false
         for type in setTypes {
             var copy = sent
@@ -320,11 +320,15 @@ enum LogitechHIDPPBatteryReader {
         }
         guard setOK else { return nil }
 
-        var received = [UInt8](repeating: 0, count: reportLength)
-        for getType: [IOHIDReportType] in [[.input, .feature], [.feature, .input]] {
+        let received = [UInt8](repeating: 0, count: reportLength)
+        let getTypeGroups: [[IOHIDReportType]] = [
+            [kIOHIDReportTypeInput, kIOHIDReportTypeFeature],
+            [kIOHIDReportTypeFeature, kIOHIDReportTypeInput],
+        ]
+        for getTypes in getTypeGroups {
             var length = received.count
             var copy = received
-            for type in getType {
+            for type in getTypes {
                 length = copy.count
                 if IOHIDDeviceGetReport(device, type, reportID, &copy, &length) == kIOReturnSuccess,
                    length >= 4,
@@ -335,10 +339,4 @@ enum LogitechHIDPPBatteryReader {
         }
         return nil
     }
-}
-
-private extension IOHIDReportType {
-    static var feature: IOHIDReportType { IOHIDReportType(kIOHIDReportTypeFeature) }
-    static var input: IOHIDReportType { IOHIDReportType(kIOHIDReportTypeInput) }
-    static var output: IOHIDReportType { IOHIDReportType(kIOHIDReportTypeOutput) }
 }
