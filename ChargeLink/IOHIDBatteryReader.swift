@@ -102,33 +102,31 @@ enum IOHIDBatteryReader {
     }
 
     private static func readBatteryFromDevice(_ device: IOHIDDevice) -> Int? {
-        let didOpen = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
-        if didOpen {
-            defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
-        }
-
         if let fromProperties = readBatteryFromHIDProperties(device) {
             return fromProperties
         }
 
-        if didOpen {
-            for (page, usage) in batteryUsageMatchers {
-                if let percent = readMatchingElements(device: device, usagePage: page, usage: usage) {
-                    return percent
-                }
-            }
-            if let percent = scanAllInputElements(device: device) {
+        guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
+            return batteryFromElementMetadata(device)
+        }
+        defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+        for (page, usage) in batteryUsageMatchers {
+            if let percent = readMatchingElements(device: device, usagePage: page, usage: usage) {
                 return percent
             }
         }
-
-        if let elements = IOHIDDeviceGetProperty(device, kIOHIDElementKey as CFString) {
-            if let percent = parseElementsProperty(elements, device: device) {
-                return percent
-            }
+        if let percent = scanAllInputElements(device: device) {
+            return percent
         }
+        return batteryFromElementMetadata(device)
+    }
 
-        return nil
+    private static func batteryFromElementMetadata(_ device: IOHIDDevice) -> Int? {
+        guard let elements = IOHIDDeviceGetProperty(device, kIOHIDElementKey as CFString) else {
+            return nil
+        }
+        return parseElementsProperty(elements, device: device)
     }
 
     /// Last resort: any input element on a vendor/battery page with a 0–100 logical range.
@@ -209,8 +207,9 @@ enum IOHIDBatteryReader {
         let hidValueOut = UnsafeMutablePointer<Unmanaged<IOHIDValue>>.allocate(capacity: 1)
         defer { hidValueOut.deallocate() }
 
-        let options = IOHIDDeviceGetValueOptions(kIOHIDDeviceGetValueWithUpdate.rawValue)
-        let status = IOHIDDeviceGetValueWithOptions(device, element, options, hidValueOut)
+        // kIOHIDDeviceGetValueWithUpdate = 0x00020000 (force device report)
+        let forceUpdate: UInt32 = 0x0002_0000
+        let status = IOHIDDeviceGetValueWithOptions(device, element, hidValueOut, forceUpdate)
         if status != kIOReturnSuccess {
             guard IOHIDDeviceGetValue(device, element, hidValueOut) == kIOReturnSuccess else {
                 return nil
@@ -232,7 +231,7 @@ enum IOHIDBatteryReader {
         if (1...100).contains(intValue) { return Int(intValue) }
         if (1...9).contains(intValue) { return Swift.min(100, (Int(intValue) * 100) / 9) }
 
-        let scaled = IOHIDValueGetScaledValue(value, kIOHIDValueScaleTypeCalibrated)
+        let scaled = IOHIDValueGetScaledValue(value, IOHIDValueScaleType(kIOHIDValueScaleTypeCalibrated))
         if scaled.isFinite {
             let percent = Int(scaled.rounded())
             if (1...100).contains(percent) { return percent }
