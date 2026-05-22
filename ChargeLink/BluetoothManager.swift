@@ -25,138 +25,81 @@ enum BluetoothDebug {
 
 // MARK: - IORegistry Battery Reader
 
-/// Reads battery levels from IORegistry using public IOKit APIs.
+/// Reads battery from the IOBluetooth device subtree in IORegistry (public IOKit APIs).
 enum IORegistryBatteryReader {
-    static let maxSearchDepth = 16
-
-    /// Battery keys on Bluetooth / HID / power services (including AirPods case).
-    static let batteryPropertyKeys: [String] = [
+    static let primaryBatteryKeys = [
         "BatteryPercent",
         "BatteryLevel",
         "AppleDeviceBatteryLevel",
-        "BatteryPercentCase",
-        "BatteryPercentLeft",
-        "BatteryPercentRight",
-        "BatteryRemaining",
-        "DeviceBatteryLevel",
-        "kIOPSCurrentCapacityKey",
-        "CurrentCapacity",
-        "MaxCapacity",
     ]
 
-    private static let batteryKeySubstrings = ["battery", "power", "capacity"]
+    static let maxSearchDepth = 20
 
-    private static let addressPropertyKeys: [String] = [
+    private static let addressPropertyKeys = [
         "DeviceAddress",
         "BluetoothAddress",
         "BD_ADDR",
         "address",
-        "HIDAddress",
     ]
 
-    private static let namePropertyKeys: [String] = [
+    private static let namePropertyKeys = [
         "Product",
         "ProductName",
         "IOName",
         "name",
-        "USB Product Name",
-    ]
-
-    private static let registryServiceClasses = [
-        "IOBluetoothDevice",
-        "IOBluetoothHCIUserClient",
-        "AppleDeviceManagementHIDEventService",
-        "IOHIDEventService",
-        "BatteryData",
-        "AppleBluetoothHIDDevice",
-        "IOHIDDevice",
     ]
 
     static func batteryPercent(name: String, address: String) -> Int? {
-        BluetoothDebug.log("IORegistry battery search for '\(name)' @ \(address)")
+        BluetoothDebug.log("IORegistry search for '\(name)' @ \(address)")
 
-        if let matched = searchMatchingServices(name: name, address: address) {
-            BluetoothDebug.log("  → matched service battery: \(matched)%")
-            return matched
+        guard let rootEntry = findBluetoothDeviceEntry(address: address, name: name) else {
+            BluetoothDebug.log("  → no matching IOBluetoothDevice registry entry")
+            return nil
+        }
+        defer { IOObjectRelease(rootEntry) }
+
+        if let percent = scanBluetoothDeviceTree(entry: rootEntry, depth: 0) {
+            BluetoothDebug.log("  → battery \(percent)%")
+            return percent
         }
 
-        if let deep = deepScanAllServices(name: name, address: address) {
-            BluetoothDebug.log("  → deep scan battery: \(deep)%")
-            return deep
-        }
-
-        BluetoothDebug.log("  → no battery keys found in IORegistry")
+        BluetoothDebug.log("  → primary battery keys not found in tree")
         return nil
     }
 
-    // MARK: - Targeted service search
+    // MARK: - Find IOBluetoothDevice entry
 
-    private static func searchMatchingServices(name: String, address: String) -> Int? {
-        for className in registryServiceClasses {
-            if let percent = searchServices(matching: className, address: address, name: name, requireMatch: true) {
-                return percent
-            }
-        }
-        return nil
-    }
-
-    private static func deepScanAllServices(name: String, address: String) -> Int? {
-        var best: Int?
-        for className in registryServiceClasses {
-            if let percent = searchServices(matching: className, address: address, name: name, requireMatch: false) {
-                best = percent
-            }
-        }
-        return best
-    }
-
-    private static func searchServices(
-        matching className: String,
-        address: String,
-        name: String,
-        requireMatch: Bool
-    ) -> Int? {
-        guard let matching = IOServiceMatching(className) else { return nil }
+    private static func findBluetoothDeviceEntry(address: String, name: String) -> io_registry_entry_t? {
+        guard let matching = IOServiceMatching("IOBluetoothDevice") else { return nil }
         var iterator: io_iterator_t = 0
-        let kernResult = IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator)
-        guard kernResult == KERN_SUCCESS else { return nil }
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return nil
+        }
         defer { IOObjectRelease(iterator) }
 
-        var bestMatch: Int?
+        var fallbackByName: io_registry_entry_t?
         while case let entry = IOIteratorNext(iterator), entry != 0 {
-            defer { IOObjectRelease(entry) }
-
-            let matches = entryMatches(entry: entry, address: address, name: name)
-            if matches || !requireMatch {
-                if let percent = deepScan(entry: entry, depth: 0, address: address, name: name, strictMatch: requireMatch && matches) {
-                    if matches {
-                        return percent
-                    }
-                    bestMatch = percent
-                }
+            if entryMatches(entry: entry, address: address, name: name) {
+                IOObjectRetain(entry)
+                return entry
             }
+            if fallbackByName == nil, entryMatchesNameOnly(entry: entry, name: name) {
+                IOObjectRetain(entry)
+                fallbackByName = entry
+                continue
+            }
+            IOObjectRelease(entry)
         }
-        return bestMatch
+        return fallbackByName
     }
 
-    /// Recursively walks the IORegistry service tree for battery properties.
-    static func deepScan(
-        entry: io_registry_entry_t,
-        depth: Int,
-        address: String,
-        name: String,
-        strictMatch: Bool
-    ) -> Int? {
+    // MARK: - Recursive tree scan
+
+    private static func scanBluetoothDeviceTree(entry: io_registry_entry_t, depth: Int) -> Int? {
         guard depth <= maxSearchDepth else { return nil }
 
-        if !strictMatch || entryMatches(entry: entry, address: address, name: name) {
-            if let percent = readBattery(fromRegistryEntry: entry) {
-                return percent
-            }
-            if let properties = copyProperties(for: entry),
-               let percent = scanFuzzyBatteryKeys(in: properties) {
-                return percent
-            }
+        if let percent = readPrimaryBatteryKeys(from: entry) {
+            return percent
         }
 
         var childIterator: io_iterator_t = 0
@@ -167,36 +110,20 @@ enum IORegistryBatteryReader {
 
         while case let child = IOIteratorNext(childIterator), child != 0 {
             defer { IOObjectRelease(child) }
-            if let percent = deepScan(
-                entry: child,
-                depth: depth + 1,
-                address: address,
-                name: name,
-                strictMatch: false
-            ) {
+            if let percent = scanBluetoothDeviceTree(entry: child, depth: depth + 1) {
                 return percent
             }
         }
         return nil
     }
 
-    static func readBattery(fromRegistryEntry entry: io_registry_entry_t) -> Int? {
+    private static func readPrimaryBatteryKeys(from entry: io_registry_entry_t) -> Int? {
         guard let properties = copyProperties(for: entry) else { return nil }
 
-        for key in batteryPropertyKeys {
-            if let value = properties[key],
-               let percent = BatteryValueNormalizer.percent(from: value, properties: properties, key: key) {
-                return percent
-            }
-        }
-        return scanFuzzyBatteryKeys(in: properties)
-    }
-
-    private static func scanFuzzyBatteryKeys(in properties: [String: Any]) -> Int? {
-        for (key, value) in properties {
-            let lower = key.lowercased()
-            guard batteryKeySubstrings.contains(where: { lower.contains($0) }) else { continue }
-            if let percent = BatteryValueNormalizer.percent(from: value, properties: properties, key: key) {
+        for key in primaryBatteryKeys {
+            guard let value = properties[key] else { continue }
+            if let percent = BatteryValueNormalizer.primaryPercent(from: value, key: key) {
+                BluetoothDebug.log("    key \(key) → \(percent)%")
                 return percent
             }
         }
@@ -271,110 +198,61 @@ enum IORegistryBatteryReader {
         return false
     }
 
-    // MARK: - Registry-only device discovery
+    private static func entryMatchesNameOnly(entry: io_registry_entry_t, name: String) -> Bool {
+        guard let properties = copyProperties(for: entry) else { return false }
+        let target = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return false }
 
-    struct RegistryDeviceInfo {
-        let name: String
-        let address: String
-        let batteryPercent: Int?
-    }
-
-    static func discoverDevicesFromRegistry() -> [RegistryDeviceInfo] {
-        guard let matching = IOServiceMatching("IOBluetoothDevice") else { return [] }
-        var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
-            return []
-        }
-        defer { IOObjectRelease(iterator) }
-
-        var results: [RegistryDeviceInfo] = []
-        var seen = Set<String>()
-
-        while case let entry = IOIteratorNext(iterator), entry != 0 {
-            defer { IOObjectRelease(entry) }
-            guard let properties = copyProperties(for: entry) else { continue }
-
-            let name = registryName(from: properties) ?? "Bluetooth Device"
-            let address = registryAddress(from: properties) ?? UUID().uuidString
-            let normalized = BluetoothAddressNormalizer.normalize(address)
-            guard !seen.contains(normalized) else { continue }
-            seen.insert(normalized)
-
-            let battery = deepScan(entry: entry, depth: 0, address: address, name: name, strictMatch: false)
-            results.append(RegistryDeviceInfo(name: name, address: address, batteryPercent: battery))
-            BluetoothDebug.log("IORegistry IOBluetoothDevice: \(name) @ \(address) battery=\(battery.map(String.init) ?? "nil")")
-        }
-
-        return results
-    }
-
-    private static func registryName(from properties: [String: Any]) -> String? {
         for key in namePropertyKeys {
-            if let value = properties[key] as? String, !value.isEmpty {
-                return value
+            if let value = properties[key] as? String, namesMatch(value, target: target) {
+                return true
             }
         }
-        return nil
-    }
-
-    private static func registryAddress(from properties: [String: Any]) -> String? {
-        for key in addressPropertyKeys {
-            guard let value = properties[key] else { continue }
-            if let string = value as? String, !string.isEmpty {
-                return string
-            }
-            if let data = value as? Data, !data.isEmpty {
-                return BluetoothAddressNormalizer.normalize(data)
-            }
-        }
-        return nil
+        return false
     }
 }
 
 // MARK: - Battery Value Normalizer
 
 enum BatteryValueNormalizer {
-    static func percent(from value: Any, properties: [String: Any], key: String) -> Int? {
-        if key == "MaxCapacity", let max = value as? NSNumber {
-            if let current = properties["CurrentCapacity"] as? NSNumber, max.intValue > 0 {
-                return clamp((current.doubleValue / max.doubleValue) * 100)
+    /// Parses only Apple-documented Bluetooth battery keys. Returns `nil` instead of 0 when unknown.
+    static func primaryPercent(from value: Any, key: String) -> Int? {
+        guard let raw = extractInt(from: value) else { return nil }
+
+        switch key {
+        case "BatteryPercent":
+            guard (1...100).contains(raw) else { return nil }
+            return raw
+
+        case "BatteryLevel", "AppleDeviceBatteryLevel":
+            guard raw > 0 else { return nil }
+            if (1...9).contains(raw) {
+                return clamp((raw * 100) / 9)
+            }
+            if (10...100).contains(raw) {
+                return raw
             }
             return nil
-        }
 
-        if let number = value as? NSNumber {
-            return percent(from: number.intValue)
-        }
-
-        if let string = value as? String {
-            let digits = string.filter(\.isNumber)
-            if let parsed = Int(digits) {
-                return percent(from: parsed)
-            }
-        }
-
-        return nil
-    }
-
-    private static func percent(from raw: Int) -> Int? {
-        switch raw {
-        case 0...9:
-            return clamp((raw * 100) / 9)
-        case 10...100:
-            return clamp(raw)
-        case 101...1000:
-            return clamp(raw / 10)
         default:
             return nil
         }
     }
 
-    private static func clamp(_ value: Double) -> Int {
-        Int(min(100, max(0, value.rounded())))
+    private static func extractInt(from value: Any) -> Int? {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let string = value as? String {
+            let digits = string.filter(\.isNumber)
+            guard !digits.isEmpty, let parsed = Int(digits) else { return nil }
+            return parsed
+        }
+        return nil
     }
 
     private static func clamp(_ value: Int) -> Int {
-        min(100, max(0, value))
+        min(100, max(1, value))
     }
 }
 
@@ -604,11 +482,8 @@ final class BluetoothManager {
         isRefreshing = true
         BluetoothDebug.log("refresh() started")
 
-        let discovered = fetchAllDevices()
+        let discovered = fetchConnectedDevices()
         devices = discovered.sorted { lhs, rhs in
-            if lhs.isConnected != rhs.isConnected {
-                return lhs.isConnected && !rhs.isConnected
-            }
             if lhs.hasBatteryReading != rhs.hasBatteryReading {
                 return lhs.hasBatteryReading && !rhs.hasBatteryReading
             }
@@ -632,117 +507,45 @@ final class BluetoothManager {
 
     // MARK: - Device Discovery
 
-    private func fetchAllDevices() -> [BluetoothDevice] {
-        var merged: [String: BluetoothDevice] = [:]
-
-        ingestIOBluetoothDevices(into: &merged, source: "pairedDevices") {
-            IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]
+    private func fetchConnectedDevices() -> [BluetoothDevice] {
+        guard let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+            BluetoothDebug.log("pairedDevices(): nil or unexpected type")
+            return []
         }
 
-        ingestIOBluetoothDevices(into: &merged, source: "recentDevices") {
-            IOBluetoothDevice.recentDevices(32) as? [IOBluetoothDevice]
-        }
+        BluetoothDebug.log("pairedDevices(): returned \(paired.count) device(s)")
 
-        ingestRegistryDevices(into: &merged)
+        var results: [BluetoothDevice] = []
+        var seenIDs = Set<String>()
 
-        return Array(merged.values)
-    }
-
-    private func ingestIOBluetoothDevices(
-        into merged: inout [String: BluetoothDevice],
-        source: String,
-        list: () -> [IOBluetoothDevice]?
-    ) {
-        guard let devices = list() else {
-            BluetoothDebug.log("\(source): nil or wrong type")
-            return
-        }
-
-        BluetoothDebug.log("\(source): returned \(devices.count) device(s)")
-
-        for ioDevice in devices {
+        for ioDevice in paired {
+            let name = ioDevice.name ?? ioDevice.nameOrAddress ?? "Bluetooth Device"
             let address = ioDevice.addressString ?? "unknown-\(ObjectIdentifier(ioDevice))"
+            let connected = ioDevice.isConnected()
+
+            BluetoothDebug.log("  • '\(name)' @ \(address) isConnected=\(connected)")
+
+            guard connected else { continue }
+
             let normalizedAddress = BluetoothAddressNormalizer.normalize(address)
             let id = normalizedAddress.isEmpty ? address : normalizedAddress
-            let name = ioDevice.name ?? ioDevice.nameOrAddress ?? "Bluetooth Device"
-            let connected = ioDevice.isConnected()
+            guard seenIDs.insert(id).inserted else { continue }
+
             let battery = IORegistryBatteryReader.batteryPercent(name: name, address: address)
+            BluetoothDebug.log("    battery: \(battery.map { "\($0)%" } ?? "unknown (—)")")
 
-            BluetoothDebug.log(
-                "\(source) item: name='\(name)' address=\(address) connected=\(connected) battery=\(battery.map(String.init) ?? "nil")"
-            )
-
-            let device = BluetoothDevice(
-                id: id,
-                name: name,
-                address: address,
-                batteryPercent: battery,
-                deviceClass: BluetoothDeviceClassMapper.deviceClass(for: ioDevice),
-                isConnected: connected
-            )
-            mergeDevice(device, into: &merged)
-        }
-    }
-
-    private func ingestRegistryDevices(into merged: inout [String: BluetoothDevice]) {
-        let registryDevices = IORegistryBatteryReader.discoverDevicesFromRegistry()
-        BluetoothDebug.log("IORegistry discoverDevicesFromRegistry: \(registryDevices.count) entries")
-
-        for info in registryDevices {
-            let normalizedAddress = BluetoothAddressNormalizer.normalize(info.address)
-            let id = normalizedAddress.isEmpty ? info.address : normalizedAddress
-
-            let device = BluetoothDevice(
-                id: id,
-                name: info.name,
-                address: info.address,
-                batteryPercent: info.batteryPercent,
-                deviceClass: BluetoothDeviceClassMapper.deviceClass(forName: info.name),
-                isConnected: true
-            )
-            mergeDevice(device, into: &merged)
-        }
-    }
-
-    private func mergeDevice(_ device: BluetoothDevice, into merged: inout [String: BluetoothDevice]) {
-        if var existing = merged[device.id] {
-            if device.batteryPercent != nil { existing = deviceWithBattery(from: device, existing: existing) }
-            if device.isConnected { existing = deviceWithConnection(from: device, existing: existing) }
-            if existing.name == "Bluetooth Device", device.name != "Bluetooth Device" {
-                existing = BluetoothDevice(
-                    id: existing.id,
-                    name: device.name,
-                    address: device.address,
-                    batteryPercent: existing.batteryPercent ?? device.batteryPercent,
-                    deviceClass: device.deviceClass,
-                    isConnected: existing.isConnected || device.isConnected
+            results.append(
+                BluetoothDevice(
+                    id: id,
+                    name: name,
+                    address: address,
+                    batteryPercent: battery,
+                    deviceClass: BluetoothDeviceClassMapper.deviceClass(for: ioDevice),
+                    isConnected: true
                 )
-            }
-            merged[device.id] = existing
-        } else {
-            merged[device.id] = device
+            )
         }
-    }
 
-    private func deviceWithBattery(from device: BluetoothDevice, existing: BluetoothDevice) -> BluetoothDevice {
-        BluetoothDevice(
-            id: existing.id,
-            name: existing.name,
-            address: existing.address,
-            batteryPercent: device.batteryPercent ?? existing.batteryPercent,
-            deviceClass: existing.deviceClass,
-            isConnected: existing.isConnected || device.isConnected
-        )
-    }
-
-    private func deviceWithConnection(from device: BluetoothDevice, existing: BluetoothDevice) -> BluetoothDevice {
-        BluetoothDevice(
-            id: existing.id,
-            name: existing.name,
-            address: existing.address,
-            batteryPercent: existing.batteryPercent ?? device.batteryPercent,
-            deviceClass: existing.deviceClass,
-            isConnected: true
-        )
+        return results
     }
 }

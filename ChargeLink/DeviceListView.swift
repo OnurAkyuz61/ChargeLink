@@ -63,7 +63,7 @@ struct DeviceListView: View {
             Image(systemName: "antenna.radiowaves.left.and.right.slash")
                 .font(.title2)
                 .foregroundStyle(.secondary)
-            Text("No Bluetooth devices found")
+            Text("No connected Bluetooth devices")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -118,22 +118,14 @@ private struct DeviceRowView: View {
                 .frame(width: 22, alignment: .center)
                 .symbolRenderingMode(.hierarchical)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(device.displayName)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if !device.isConnected {
-                    Text("Not connected")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            Text(device.displayName)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             Spacer(minLength: 8)
 
             batteryLabel
         }
-        .opacity(device.isConnected ? 1 : 0.55)
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .accessibilityElement(children: .combine)
