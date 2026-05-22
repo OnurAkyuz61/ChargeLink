@@ -7,16 +7,13 @@ import SwiftUI
 
 @main
 struct ChargeLinkApp: App {
-    @State private var viewModel = BatteryViewModel(manager: BluetoothManager.shared)
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            DeviceListView(viewModel: viewModel)
-        } label: {
-            Image(systemName: viewModel.menuBarSymbolName)
-                .symbolRenderingMode(.hierarchical)
-                .id(viewModel.menuBarSymbolName)
+        // Placeholder scene — UI lives in AppDelegate's NSStatusItem. Window never shown.
+        WindowGroup {
+            EmptyView()
         }
-        .menuBarExtraStyle(.window)
+        .defaultLaunchBehavior(.suppressed)
     }
 }

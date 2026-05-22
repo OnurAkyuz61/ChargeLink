@@ -588,9 +588,11 @@ final class BluetoothManager {
 
     private init() {
         BluetoothPermissionManager.shared.requestAccessIfNeeded()
-        refresh()
         runtime = BluetoothRuntimeResources(pollInterval: pollInterval) { [weak self] in
             self?.refresh()
+        }
+        Task { @MainActor in
+            self.refresh()
         }
     }
 
