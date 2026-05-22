@@ -44,6 +44,8 @@ enum DeviceNameMatcher {
 
 @MainActor
 enum BluetoothBatteryEngine {
+    private static var mergedBatteriesByName: [String: Int] = [:]
+
     private static let registryBatteryKeys = [
         "BatteryPercent",
         "BatteryLevel",
@@ -64,14 +66,34 @@ enum BluetoothBatteryEngine {
         "IOHIDEventService",
     ]
 
-    /// Refreshes BLE GATT cache; call once per device scan pass.
+    /// Refreshes all battery caches (BLE + IOHID snapshot + IORegistry snapshot).
     static func refreshBLECache() async {
+        await refreshAllCaches()
+    }
+
+    static func refreshAllCaches() async {
         _ = await BLEBatteryScanner.shared.refresh()
+
+        var merged = IOHIDBatteryReader.allProductBatteries()
+        for (name, percent) in IORegistryBatteryReader.allProductBatteries() {
+            merged[name] = Swift.max(merged[name] ?? 0, percent)
+        }
+        for (name, percent) in BLEBatteryScanner.shared.allReadings() {
+            merged[name] = Swift.max(merged[name] ?? 0, percent)
+        }
+
+        mergedBatteriesByName = merged
+        BluetoothDebug.log("Battery cache: \(merged.count) product(s) — \(merged)")
     }
 
     /// Resolves battery for an IOBluetooth-connected device using all public subsystems.
     static func resolveBattery(name: String, address: String) -> BatteryReading {
         BluetoothDebug.log("BatteryEngine resolve '\(name)' @ \(address)")
+
+        if let cached = batteryFromMergedCache(deviceName: name) {
+            BluetoothDebug.log("  → \(cached.displayText) [cache]")
+            return cached
+        }
 
         var candidates: [PrioritizedBatteryReading] = []
 
@@ -98,6 +120,19 @@ enum BluetoothBatteryEngine {
 
         BluetoothDebug.log("  → no battery data")
         return .unknown
+    }
+
+    private static func batteryFromMergedCache(deviceName: String) -> BatteryReading? {
+        let key = DeviceNameMatcher.normalize(deviceName)
+        if let percent = mergedBatteriesByName[key] {
+            return BatteryReading(percent: percent, detailText: "\(percent)%", source: "cache-exact")
+        }
+        for (cachedName, percent) in mergedBatteriesByName {
+            if DeviceNameMatcher.matches(cachedName, target: key) {
+                return BatteryReading(percent: percent, detailText: "\(percent)%", source: "cache-fuzzy")
+            }
+        }
+        return nil
     }
 
     // MARK: - CoreBluetooth

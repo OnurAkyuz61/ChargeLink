@@ -28,14 +28,45 @@ enum IOHIDBatteryReader {
         "MaxCapacity",
         "AppleDeviceBatteryLevel",
     ]
+    /// Logitech BLE devices expose battery on vendor usage page 65347 (0xFF43).
+    private static let logitechVendorPage: UInt32 = 65347
+    private static let logitechBatteryUsage: UInt32 = 514
+
     private static let batteryUsageMatchers: [(UInt32, UInt32?)] = [
+        (logitechVendorPage, logitechBatteryUsage),
+        (logitechVendorPage, nil),
         (HIDBatteryUsage.pageGenericDeviceControls, HIDBatteryUsage.genDevControlsBatteryStrength),
         (HIDBatteryUsage.pageBatterySystem, HIDBatteryUsage.bsRemainingCapacity),
         (HIDBatteryUsage.pageBatterySystem, nil),
-        (0xFF07, nil), // Logitech vendor page (also seen as 65347 in registry dumps)
+        (0xFF07, nil),
         (0xFF43, nil),
-        (65347, nil),
     ]
+
+    /// Scans every HID device and returns product name → battery % (for merge with IOBluetooth list).
+    static func allProductBatteries() -> [String: Int] {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(manager, nil)
+        guard IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess else {
+            BluetoothDebug.log("IOHID snapshot: manager open failed")
+            return [:]
+        }
+        defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+        guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
+            return [:]
+        }
+
+        var map: [String: Int] = [:]
+        for device in deviceSet {
+            guard let product = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String,
+                  !product.isEmpty else { continue }
+            guard let percent = readBatteryFromDevice(device) else { continue }
+            let key = DeviceNameMatcher.normalize(product)
+            map[key] = Swift.max(map[key] ?? 0, percent)
+            BluetoothDebug.log("IOHID snapshot: \(product) → \(percent)%")
+        }
+        return map
+    }
 
     static func batteryPercent(productName: String) -> Int? {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -71,19 +102,23 @@ enum IOHIDBatteryReader {
     }
 
     private static func readBatteryFromDevice(_ device: IOHIDDevice) -> Int? {
+        let didOpen = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
+        if didOpen {
+            defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
+        }
+
         if let fromProperties = readBatteryFromHIDProperties(device) {
             return fromProperties
         }
 
-        if IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) != kIOReturnSuccess {
-            BluetoothDebug.log("    IOHIDDeviceOpen failed for device")
-        } else {
-            defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
-
+        if didOpen {
             for (page, usage) in batteryUsageMatchers {
                 if let percent = readMatchingElements(device: device, usagePage: page, usage: usage) {
                     return percent
                 }
+            }
+            if let percent = scanAllInputElements(device: device) {
+                return percent
             }
         }
 
@@ -94,6 +129,26 @@ enum IOHIDBatteryReader {
         }
 
         return nil
+    }
+
+    /// Last resort: any input element on a vendor/battery page with a 0–100 logical range.
+    private static func scanAllInputElements(device: IOHIDDevice) -> Int? {
+        guard let elements = IOHIDDeviceCopyMatchingElements(device, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? Set<IOHIDElement> else {
+            return nil
+        }
+        var best: Int?
+        for element in elements {
+            let page = IOHIDElementGetUsagePage(element)
+            let isCandidate = page == logitechVendorPage
+                || page == Int(kHIDPage_BatterySystem)
+                || page == Int(HIDBatteryUsage.pageGenericDeviceControls)
+                || page == 0xFF07
+            guard isCandidate else { continue }
+            if let percent = readElementValue(device: device, element: element) {
+                best = Swift.max(best ?? 0, percent)
+            }
+        }
+        return best
     }
 
     private static func readBatteryFromHIDProperties(_ device: IOHIDDevice) -> Int? {
@@ -154,8 +209,12 @@ enum IOHIDBatteryReader {
         let hidValueOut = UnsafeMutablePointer<Unmanaged<IOHIDValue>>.allocate(capacity: 1)
         defer { hidValueOut.deallocate() }
 
-        guard IOHIDDeviceGetValue(device, element, hidValueOut) == kIOReturnSuccess else {
-            return nil
+        let options = IOHIDDeviceGetValueOptions(kIOHIDDeviceGetValueWithUpdate.rawValue)
+        let status = IOHIDDeviceGetValueWithOptions(device, element, options, hidValueOut)
+        if status != kIOReturnSuccess {
+            guard IOHIDDeviceGetValue(device, element, hidValueOut) == kIOReturnSuccess else {
+                return nil
+            }
         }
         let value = hidValueOut.pointee.takeRetainedValue()
 
@@ -173,6 +232,12 @@ enum IOHIDBatteryReader {
         if (1...100).contains(intValue) { return Int(intValue) }
         if (1...9).contains(intValue) { return Swift.min(100, (Int(intValue) * 100) / 9) }
 
+        let scaled = IOHIDValueGetScaledValue(value, kIOHIDValueScaleTypeCalibrated)
+        if scaled.isFinite {
+            let percent = Int(scaled.rounded())
+            if (1...100).contains(percent) { return percent }
+        }
+
         return nil
     }
 
@@ -188,7 +253,7 @@ enum IOHIDBatteryReader {
                 page == Int(HIDBatteryUsage.pageGenericDeviceControls)
                     && usage == Int(HIDBatteryUsage.genDevControlsBatteryStrength)
             ) || page == Int(HIDBatteryUsage.pageBatterySystem)
-                || page == 0xFF07 || page == 65347 || page == 0xFF43
+                || page == Int(logitechVendorPage) || page == 0xFF07 || page == 0xFF43
 
             guard isBatteryPage else { continue }
 

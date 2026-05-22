@@ -78,6 +78,43 @@ enum IORegistryBatteryReader {
 
     // MARK: - Public API
 
+    /// Enumerates all HID event services and returns every product name → battery % pair found.
+    static func allProductBatteries() -> [String: Int] {
+        var map: [String: Int] = [:]
+
+        for className in hidEventServiceClasses {
+            guard let matching = IOServiceMatching(className) else { continue }
+            var iterator: io_iterator_t = 0
+            guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+                continue
+            }
+            defer { IOObjectRelease(iterator) }
+
+            while case let entry = IOIteratorNext(iterator), entry != 0 {
+                defer { IOObjectRelease(entry) }
+                guard let props = copyProperties(for: entry) else { continue }
+
+                let productNames = namePropertyKeys.compactMap { props[$0] as? String }.filter { !$0.isEmpty }
+                guard !productNames.isEmpty else { continue }
+
+                var candidates: [BatteryCandidate] = []
+                if let percent = readDirectBatteryProperty(on: entry) {
+                    candidates.append(BatteryCandidate(percent: percent, priority: 0, source: "\(className).direct"))
+                }
+                collectBatteryPercentKeys(entry: entry, depth: 0, into: &candidates, path: className)
+
+                guard let best = BatteryCandidate.selectBest(from: candidates) else { continue }
+                for name in productNames {
+                    let key = DeviceNameMatcher.normalize(name)
+                    map[key] = Swift.max(map[key] ?? 0, best.percent)
+                    BluetoothDebug.log("IORegistry snapshot: \(name) → \(best.percent)% [\(best.source)]")
+                }
+            }
+        }
+
+        return map
+    }
+
     /// Scans Apple HID event driver services where macOS publishes `BatteryPercent` for BT peripherals.
     static func batteryFromHIDEventServices(name: String, address: String) -> Int? {
         var candidates: [BatteryCandidate] = []
@@ -827,7 +864,7 @@ final class BluetoothManager {
         defer { isRefreshing = false }
         BluetoothDebug.log("refreshDevices() started")
 
-        await BluetoothBatteryEngine.refreshBLECache()
+        await BluetoothBatteryEngine.refreshAllCaches()
         let discovered = fetchConnectedDevices()
         devices = discovered.sorted { lhs, rhs in
             if lhs.hasBatteryReading != rhs.hasBatteryReading {

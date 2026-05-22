@@ -23,6 +23,8 @@ final class BLEBatteryScanner: NSObject {
     private var poweredOnContinuation: CheckedContinuation<Void, Never>?
     private var scanContinuation: CheckedContinuation<Void, Never>?
     private var pendingPeripheralIDs: Set<UUID> = []
+    private let poweredOnTimeoutSeconds: UInt64 = 5
+    private let scanTimeoutSeconds: UInt64 = 6
 
     private override init() {
         super.init()
@@ -70,13 +72,17 @@ final class BLEBatteryScanner: NSObject {
                 delegate.discoverBattery(on: peripheral)
             }
             Task {
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                try? await Task.sleep(nanoseconds: scanTimeoutSeconds * 1_000_000_000)
                 self.forceFinishScan()
             }
         }
 
         BluetoothDebug.log("BLE: readings → \(readingsByName)")
         return readingsByName
+    }
+
+    func allReadings() -> [String: Int] {
+        readingsByName
     }
 
     func percent(matchingDeviceName name: String) -> Int? {
@@ -90,11 +96,15 @@ final class BLEBatteryScanner: NSObject {
         return nil
     }
 
-    fileprivate func storeReading(name: String?, percent: Int) {
-        guard let name, (1...100).contains(percent) else { return }
-        let key = DeviceNameMatcher.normalize(name)
-        readingsByName[key] = percent
-        BluetoothDebug.log("BLE: stored \(name) → \(percent)%")
+    fileprivate func storeReading(name: String?, percent: Int, alsoStore normalizedAliases: [String] = []) {
+        guard (1...100).contains(percent) else { return }
+        var keys: [String] = []
+        if let name { keys.append(DeviceNameMatcher.normalize(name)) }
+        keys.append(contentsOf: normalizedAliases.map { DeviceNameMatcher.normalize($0) })
+        for key in keys where !key.isEmpty {
+            readingsByName[key] = percent
+            BluetoothDebug.log("BLE: stored \(key) → \(percent)%")
+        }
     }
 
     fileprivate func peripheralFinished(_ id: UUID) {
@@ -121,8 +131,23 @@ final class BLEBatteryScanner: NSObject {
     private func waitUntilPoweredOn() async {
         guard let centralManager else { return }
         if centralManager.state == .poweredOn { return }
-        await withCheckedContinuation { continuation in
-            poweredOnContinuation = continuation
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                await withCheckedContinuation { continuation in
+                    self.poweredOnContinuation = continuation
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: self.poweredOnTimeoutSeconds * 1_000_000_000)
+                await MainActor.run {
+                    if let poweredOnContinuation = self.poweredOnContinuation {
+                        self.poweredOnContinuation = nil
+                        poweredOnContinuation.resume()
+                    }
+                }
+            }
+            await group.waitForAll()
         }
     }
 }
@@ -186,6 +211,9 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
                 self.complete(peripheral)
                 return
             }
+            if characteristic.properties.contains(.notify) {
+                peripheral.setNotifyValue(true, for: characteristic)
+            }
             if let data = characteristic.value, let percent = Self.parseBatteryData(data) {
                 self.scanner?.storeReading(name: peripheral.name, percent: percent)
                 self.complete(peripheral)
@@ -207,6 +235,14 @@ private final class BLEPeripheralBatteryDelegate: NSObject, CBPeripheralDelegate
                   let percent = Self.parseBatteryData(data) else { return }
             self.scanner?.storeReading(name: peripheral.name, percent: percent)
         }
+    }
+
+    nonisolated func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        // Notification subscription only; value arrives via didUpdateValueFor.
     }
 
     private func complete(_ peripheral: CBPeripheral) {
