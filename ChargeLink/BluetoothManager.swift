@@ -25,21 +25,41 @@ enum BluetoothDebug {
 
 // MARK: - IORegistry Battery Reader
 
-/// Reads battery from the IOBluetooth device subtree in IORegistry (public IOKit APIs).
+/// Multi-strategy battery discovery via IORegistry (public IOKit APIs only).
 enum IORegistryBatteryReader {
-    static let primaryBatteryKeys = [
+    static let maxSearchDepth = 32
+
+    /// Keys checked on every registry node during deep traversal.
+    static let batteryKeys: [String] = [
         "BatteryPercent",
         "BatteryLevel",
         "AppleDeviceBatteryLevel",
+        "BatteryPercentLeft",
+        "BatteryPercentRight",
+        "BatteryPercentCase",
     ]
 
-    static let maxSearchDepth = 20
+    private static let capacityKeys = (current: "CurrentCapacity", max: "MaxCapacity")
+
+    private static let registryPlanes: [String] = [
+        kIOServicePlane,
+        kIOPowerPlane,
+        kIODeviceTreePlane,
+    ]
+
+    private static let hidServiceClasses = [
+        "IOHIDDevice",
+        "IOHIDEventService",
+        "AppleDeviceManagementHIDEventService",
+        "AppleBluetoothHIDDevice",
+    ]
 
     private static let addressPropertyKeys = [
         "DeviceAddress",
         "BluetoothAddress",
         "BD_ADDR",
         "address",
+        "HIDAddress",
     ]
 
     private static let namePropertyKeys = [
@@ -47,27 +67,40 @@ enum IORegistryBatteryReader {
         "ProductName",
         "IOName",
         "name",
+        "USB Product Name",
     ]
 
-    static func batteryPercent(name: String, address: String) -> Int? {
-        BluetoothDebug.log("IORegistry search for '\(name)' @ \(address)")
+    // MARK: - Public API
 
-        guard let rootEntry = findBluetoothDeviceEntry(address: address, name: name) else {
-            BluetoothDebug.log("  → no matching IOBluetoothDevice registry entry")
+    static func batteryPercent(name: String, address: String) -> Int? {
+        BluetoothDebug.log("IORegistry multi-strategy search for '\(name)' @ \(address)")
+
+        var candidates: [BatteryCandidate] = []
+
+        if let bluetoothRoot = findBluetoothDeviceEntry(address: address, name: name) {
+            defer { IOObjectRelease(bluetoothRoot) }
+            BluetoothDebug.log("  strategy: IOBluetoothDevice subtree")
+            collectFromEntry(bluetoothRoot, depth: 0, into: &candidates, path: "IOBluetoothDevice")
+        } else {
+            BluetoothDebug.log("  strategy: no IOBluetoothDevice root (will try HID)")
+        }
+
+        collectFromHIDServices(name: name, address: address, into: &candidates)
+
+        for className in hidServiceClasses where className != "IOHIDDevice" {
+            collectFromServiceClass(className, name: name, address: address, into: &candidates)
+        }
+
+        guard let best = BatteryCandidate.selectBest(from: candidates) else {
+            BluetoothDebug.log("  → no battery keys found")
             return nil
         }
-        defer { IOObjectRelease(rootEntry) }
 
-        if let percent = scanBluetoothDeviceTree(entry: rootEntry, depth: 0) {
-            BluetoothDebug.log("  → battery \(percent)%")
-            return percent
-        }
-
-        BluetoothDebug.log("  → primary battery keys not found in tree")
-        return nil
+        BluetoothDebug.log("  → battery \(best.percent)% via \(best.source)")
+        return best.percent
     }
 
-    // MARK: - Find IOBluetoothDevice entry
+    // MARK: - Strategy 1: IOBluetoothDevice tree
 
     private static func findBluetoothDeviceEntry(address: String, name: String) -> io_registry_entry_t? {
         guard let matching = IOServiceMatching("IOBluetoothDevice") else { return nil }
@@ -77,58 +110,115 @@ enum IORegistryBatteryReader {
         }
         defer { IOObjectRelease(iterator) }
 
-        var fallbackByName: io_registry_entry_t?
+        var nameFallback: io_registry_entry_t?
         while case let entry = IOIteratorNext(iterator), entry != 0 {
             if entryMatches(entry: entry, address: address, name: name) {
                 IOObjectRetain(entry)
+                if let nameFallback { IOObjectRelease(nameFallback) }
                 return entry
             }
-            if fallbackByName == nil, entryMatchesNameOnly(entry: entry, name: name) {
+            if nameFallback == nil, entryMatchesNameOnly(entry: entry, name: name) {
                 IOObjectRetain(entry)
-                fallbackByName = entry
+                nameFallback = entry
                 continue
             }
             IOObjectRelease(entry)
         }
-        return fallbackByName
+        return nameFallback
     }
 
-    // MARK: - Recursive tree scan
+    // MARK: - Strategy 2: IOHIDDevice (Logitech etc.)
 
-    private static func scanBluetoothDeviceTree(entry: io_registry_entry_t, depth: Int) -> Int? {
-        guard depth <= maxSearchDepth else { return nil }
+    private static func collectFromHIDServices(
+        name: String,
+        address: String,
+        into candidates: inout [BatteryCandidate]
+    ) {
+        BluetoothDebug.log("  strategy: IOHIDDevice services")
+        enumerateMatchingServices(className: "IOHIDDevice", name: name, address: address, into: &candidates)
+    }
 
-        if let percent = readPrimaryBatteryKeys(from: entry) {
-            return percent
+    private static func collectFromServiceClass(
+        _ className: String,
+        name: String,
+        address: String,
+        into candidates: inout [BatteryCandidate]
+    ) {
+        enumerateMatchingServices(className: className, name: name, address: address, into: &candidates)
+    }
+
+    private static func enumerateMatchingServices(
+        className: String,
+        name: String,
+        address: String,
+        into candidates: inout [BatteryCandidate]
+    ) {
+        guard let matching = IOServiceMatching(className) else { return }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return
+        }
+        defer { IOObjectRelease(iterator) }
+
+        while case let entry = IOIteratorNext(iterator), entry != 0 {
+            defer { IOObjectRelease(entry) }
+            guard entryMatchesDevice(entry: entry, address: address, name: name) else { continue }
+            collectFromEntry(entry, depth: 0, into: &candidates, path: className)
+        }
+    }
+
+    // MARK: - Deep recursive traversal
+
+    private static func collectFromEntry(
+        _ entry: io_registry_entry_t,
+        depth: Int,
+        into candidates: inout [BatteryCandidate],
+        path: String
+    ) {
+        guard depth <= maxSearchDepth else { return }
+
+        if let properties = copyProperties(for: entry) {
+            let className = registryEntryName(entry) ?? path
+            if let found = BatteryValueNormalizer.extractBattery(from: properties) {
+                candidates.append(
+                    BatteryCandidate(percent: found.percent, priority: found.priority, source: "\(className).\(found.key)")
+                )
+                BluetoothDebug.log("    [depth \(depth)] \(className) \(found.key) → \(found.percent)%")
+            }
         }
 
+        for plane in registryPlanes {
+            recurseChildren(of: entry, plane: plane, depth: depth, into: &candidates, path: path)
+        }
+    }
+
+    private static func recurseChildren(
+        of entry: io_registry_entry_t,
+        plane: String,
+        depth: Int,
+        into candidates: inout [BatteryCandidate],
+        path: String
+    ) {
         var childIterator: io_iterator_t = 0
-        guard IORegistryEntryGetChildIterator(entry, kIOServicePlane, &childIterator) == KERN_SUCCESS else {
-            return nil
+        guard IORegistryEntryGetChildIterator(entry, plane, &childIterator) == KERN_SUCCESS else {
+            return
         }
         defer { IOObjectRelease(childIterator) }
 
         while case let child = IOIteratorNext(childIterator), child != 0 {
-            defer { IOObjectRelease(child) }
-            if let percent = scanBluetoothDeviceTree(entry: child, depth: depth + 1) {
-                return percent
-            }
+            collectFromEntry(child, depth: depth + 1, into: &candidates, path: path)
+            IOObjectRelease(child)
         }
-        return nil
     }
 
-    private static func readPrimaryBatteryKeys(from entry: io_registry_entry_t) -> Int? {
-        guard let properties = copyProperties(for: entry) else { return nil }
-
-        for key in primaryBatteryKeys {
-            guard let value = properties[key] else { continue }
-            if let percent = BatteryValueNormalizer.primaryPercent(from: value, key: key) {
-                BluetoothDebug.log("    key \(key) → \(percent)%")
-                return percent
-            }
-        }
-        return nil
+    private static func registryEntryName(_ entry: io_registry_entry_t) -> String? {
+        var nameBuffer = [CChar](repeating: 0, count: 128)
+        guard IORegistryEntryGetName(entry, &nameBuffer) == KERN_SUCCESS else { return nil }
+        let name = String(cString: nameBuffer)
+        return name.isEmpty ? nil : name
     }
+
+    // MARK: - Property helpers
 
     private static func copyProperties(for entry: io_registry_entry_t) -> [String: Any]? {
         var properties: Unmanaged<CFMutableDictionary>?
@@ -143,6 +233,14 @@ enum IORegistryBatteryReader {
             return nil
         }
         return dict
+    }
+
+    // MARK: - Device matching
+
+    private static func entryMatchesDevice(entry: io_registry_entry_t, address: String, name: String) -> Bool {
+        entryMatches(entry: entry, address: address, name: name)
+            || entryMatchesNameOnly(entry: entry, name: name)
+            || entryMatchesFuzzyName(entry: entry, name: name)
     }
 
     private static func entryMatches(
@@ -174,6 +272,44 @@ enum IORegistryBatteryReader {
         return false
     }
 
+    private static func entryMatchesNameOnly(entry: io_registry_entry_t, name: String) -> Bool {
+        guard let properties = copyProperties(for: entry) else { return false }
+        let target = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return false }
+
+        for key in namePropertyKeys {
+            if let value = properties[key] as? String, namesMatch(value, target: target) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Fuzzy match for Logitech / shortened product names in HID nodes.
+    private static func entryMatchesFuzzyName(entry: io_registry_entry_t, name: String) -> Bool {
+        guard let properties = copyProperties(for: entry) else { return false }
+        let targetTokens = tokenize(name)
+        guard !targetTokens.isEmpty else { return false }
+
+        for key in namePropertyKeys {
+            guard let value = properties[key] as? String else { continue }
+            let registryTokens = tokenize(value)
+            let overlap = targetTokens.filter { token in
+                registryTokens.contains { $0.contains(token) || token.contains($0) }
+            }
+            if overlap.count >= max(1, min(targetTokens.count, 2)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func tokenize(_ name: String) -> [String] {
+        name.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 }
+    }
+
     private static func namesMatch(_ registryName: String, target: String) -> Bool {
         let lhs = registryName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !lhs.isEmpty, !target.isEmpty else { return false }
@@ -197,30 +333,96 @@ enum IORegistryBatteryReader {
 
         return false
     }
+}
 
-    private static func entryMatchesNameOnly(entry: io_registry_entry_t, name: String) -> Bool {
-        guard let properties = copyProperties(for: entry) else { return false }
-        let target = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty else { return false }
+// MARK: - Battery Candidate
 
-        for key in namePropertyKeys {
-            if let value = properties[key] as? String, namesMatch(value, target: target) {
-                return true
-            }
-        }
-        return false
+private struct BatteryCandidate {
+    let percent: Int
+    let priority: Int
+    let source: String
+
+    static func selectBest(from candidates: [BatteryCandidate]) -> BatteryCandidate? {
+        candidates.min { $0.priority < $1.priority }
     }
 }
 
 // MARK: - Battery Value Normalizer
 
 enum BatteryValueNormalizer {
-    /// Parses only Apple-documented Bluetooth battery keys. Returns `nil` instead of 0 when unknown.
-    static func primaryPercent(from value: Any, key: String) -> Int? {
+    struct BatteryReading {
+        let percent: Int
+        let priority: Int
+        let key: String
+    }
+
+    /// Extracts the best battery reading from a registry property dictionary.
+    static func extractBattery(from properties: [String: Any]) -> BatteryReading? {
+        if let airPods = airPodsAggregate(from: properties) {
+            return airPods
+        }
+
+        for key in IORegistryBatteryReader.batteryKeys {
+            guard let value = properties[key] else { continue }
+            if let percent = percent(from: value, key: key) {
+                return BatteryReading(percent: percent, priority: priority(for: key), key: key)
+            }
+        }
+
+        if let capacity = capacityRatio(from: properties) {
+            return BatteryReading(percent: capacity, priority: 8, key: "CurrentCapacity/MaxCapacity")
+        }
+
+        return nil
+    }
+
+    // MARK: - AirPods (left / right / case)
+
+    private static func airPodsAggregate(from properties: [String: Any]) -> BatteryReading? {
+        let left = properties["BatteryPercentLeft"].flatMap { percent(from: $0, key: "BatteryPercentLeft") }
+        let right = properties["BatteryPercentRight"].flatMap { percent(from: $0, key: "BatteryPercentRight") }
+        let caseBatt = properties["BatteryPercentCase"].flatMap { percent(from: $0, key: "BatteryPercentCase") }
+        let single = properties["BatteryPercent"].flatMap { percent(from: $0, key: "BatteryPercent") }
+
+        let budValues = [left, right].compactMap { $0 }
+        if let minBud = budValues.min() {
+            return BatteryReading(percent: minBud, priority: 2, key: "BatteryPercentLeft/Right")
+        }
+
+        if let caseBatt {
+            return BatteryReading(percent: caseBatt, priority: 3, key: "BatteryPercentCase")
+        }
+
+        if let single {
+            return BatteryReading(percent: single, priority: 1, key: "BatteryPercent")
+        }
+
+        return nil
+    }
+
+    // MARK: - Capacity ratio
+
+    private static func capacityRatio(from properties: [String: Any]) -> Int? {
+        guard let maxValue = properties["MaxCapacity"],
+              let currentValue = properties["CurrentCapacity"],
+              let max = extractInt(from: maxValue),
+              let current = extractInt(from: currentValue),
+              max > 0, current >= 0 else {
+            return nil
+        }
+
+        let percent = Int((Double(current) / Double(max) * 100).rounded())
+        guard (1...100).contains(percent) else { return nil }
+        return percent
+    }
+
+    // MARK: - Key-specific parsing
+
+    static func percent(from value: Any, key: String) -> Int? {
         guard let raw = extractInt(from: value) else { return nil }
 
         switch key {
-        case "BatteryPercent":
+        case "BatteryPercent", "BatteryPercentLeft", "BatteryPercentRight", "BatteryPercentCase":
             guard (1...100).contains(raw) else { return nil }
             return raw
 
@@ -235,20 +437,66 @@ enum BatteryValueNormalizer {
             return nil
 
         default:
-            return nil
+            guard (1...100).contains(raw) else { return nil }
+            return raw
         }
     }
 
-    private static func extractInt(from value: Any) -> Int? {
+    static func priority(for key: String) -> Int {
+        switch key {
+        case "BatteryPercent": return 1
+        case "BatteryPercentLeft", "BatteryPercentRight": return 2
+        case "BatteryPercentCase": return 3
+        case "AppleDeviceBatteryLevel": return 4
+        case "BatteryLevel": return 5
+        default: return 6
+        }
+    }
+
+    // MARK: - Type-safe value extraction
+
+    static func extractInt(from value: Any) -> Int? {
         if let number = value as? NSNumber {
             return number.intValue
         }
+
         if let string = value as? String {
-            let digits = string.filter(\.isNumber)
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasSuffix("%") {
+                let digits = trimmed.dropLast().filter(\.isNumber)
+                if let parsed = Int(digits) { return parsed }
+            }
+            let digits = trimmed.filter(\.isNumber)
             guard !digits.isEmpty, let parsed = Int(digits) else { return nil }
             return parsed
         }
+
+        if let data = value as? Data {
+            return extractInt(from: data)
+        }
+
+        if let array = value as? [Int], let first = array.first {
+            return first
+        }
+
         return nil
+    }
+
+    private static func extractInt(from data: Data) -> Int? {
+        switch data.count {
+        case 1:
+            return Int(data[data.startIndex])
+        case 2:
+            return data.withUnsafeBytes { ptr in
+                Int(ptr.load(as: UInt16.self))
+            }
+        case 4:
+            return data.withUnsafeBytes { ptr in
+                Int(ptr.load(as: UInt32.self))
+            }
+        default:
+            return nil
+        }
     }
 
     private static func clamp(_ value: Int) -> Int {
