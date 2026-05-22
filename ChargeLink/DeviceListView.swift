@@ -14,11 +14,13 @@ struct DeviceListView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            deviceList
+            content
             Divider()
             footer
         }
         .frame(width: popoverWidth)
+        .animation(.easeInOut(duration: 0.28), value: viewModel.isScanning)
+        .animation(.easeInOut(duration: 0.28), value: viewModel.scanDidFail)
     }
 
     // MARK: - Header
@@ -30,13 +32,75 @@ struct DeviceListView: View {
             Text(viewModel.statusSubtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .contentTransition(.numericText())
+                .animation(.easeInOut(duration: 0.2), value: viewModel.statusSubtitle)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
 
-    // MARK: - Device List
+    // MARK: - Content
+
+    @ViewBuilder
+    private var content: some View {
+        ZStack(alignment: .top) {
+            if viewModel.isScanning {
+                scanningPanel
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .top)),
+                        removal: .opacity.combined(with: .move(edge: .bottom))
+                    ))
+            } else if viewModel.scanDidFail {
+                errorState
+                    .transition(.opacity.combined(with: .slide))
+            } else {
+                deviceList
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .bottom)),
+                        removal: .opacity.combined(with: .move(edge: .top))
+                    ))
+            }
+        }
+        .frame(minHeight: 120)
+    }
+
+    private var scanningPanel: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.regular)
+                .frame(maxWidth: .infinity)
+
+            Text(viewModel.scanningStatusMessage)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .contentTransition(.opacity)
+                .animation(.easeInOut(duration: 0.25), value: viewModel.scanningStatusMessage)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 28)
+        .frame(maxWidth: .infinity)
+        .background(Color.accentColor.opacity(0.06))
+    }
+
+    private var errorState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.title2)
+                .foregroundStyle(.orange)
+            Text("Hata")
+                .font(.subheadline.weight(.semibold))
+            Text("Tarama sırasında bir sorun oluştu. Lütfen tekrar deneyin.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .padding(.horizontal, 16)
+    }
 
     @ViewBuilder
     private var deviceList: some View {
@@ -63,11 +127,11 @@ struct DeviceListView: View {
             Image(systemName: "antenna.radiowaves.left.and.right.slash")
                 .font(.title2)
                 .foregroundStyle(.secondary)
-            Text("No connected Bluetooth devices")
+            Text("Bağlı Bluetooth cihazı yok")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Text("Check System Settings → Privacy & Security → Bluetooth, then tap Refresh.")
+            Text("Sistem Ayarları → Gizlilik ve Güvenlik → Bluetooth bölümünü kontrol edin.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -84,21 +148,22 @@ struct DeviceListView: View {
             Button {
                 viewModel.refresh()
             } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+                Label("Yenile", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .disabled(viewModel.isRefreshing)
+            .disabled(viewModel.isScanning)
 
             Spacer()
 
             Button(role: .destructive) {
                 viewModel.quit()
             } label: {
-                Text("Quit")
+                Text("Çıkış")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .disabled(viewModel.isScanning)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -129,7 +194,7 @@ private struct DeviceRowView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(device.displayName), battery \(device.batteryDisplay)")
+        .accessibilityLabel("\(device.displayName), pil \(device.batteryDisplay)")
     }
 
     @ViewBuilder

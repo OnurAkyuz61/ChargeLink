@@ -467,20 +467,24 @@ final class BluetoothManager {
     private init() {
         BluetoothPermissionManager.shared.requestAccessIfNeeded()
         runtime = BluetoothRuntimeResources(pollInterval: pollInterval) { [weak self] in
-            self?.refresh()
+            Task { @MainActor in
+                await self?.refreshDevices()
+            }
         }
         Task { @MainActor in
-            self.refresh()
+            await self.refreshDevices()
         }
     }
 
-    func refresh() {
+    /// Performs the Bluetooth / IORegistry device scan (no minimum UI delay).
+    func refreshDevices() async {
         guard !isRefreshing else {
-            BluetoothDebug.log("refresh() skipped — already in progress")
+            BluetoothDebug.log("refreshDevices() skipped — already in progress")
             return
         }
         isRefreshing = true
-        BluetoothDebug.log("refresh() started")
+        defer { isRefreshing = false }
+        BluetoothDebug.log("refreshDevices() started")
 
         let discovered = fetchConnectedDevices()
         devices = discovered.sorted { lhs, rhs in
@@ -491,9 +495,8 @@ final class BluetoothManager {
         }
 
         lastRefreshed = Date()
-        isRefreshing = false
 
-        BluetoothDebug.log("refresh() finished — \(devices.count) device(s) in UI list")
+        BluetoothDebug.log("refreshDevices() finished — \(devices.count) device(s) in UI list")
         for device in devices {
             BluetoothDebug.log("  • \(device.displayName) connected=\(device.isConnected) battery=\(device.batteryDisplay)")
         }

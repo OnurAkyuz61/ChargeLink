@@ -30,6 +30,16 @@ private final class DevicesUpdateObserver {
     }
 }
 
+enum ScanningMessages {
+    static let rotating = [
+        "Şu an bağlı cihazlar taranıyor...",
+        "IORegistry sorgulanıyor...",
+        "AirPods durumu alınıyor...",
+        "Bluetooth pil verileri okunuyor...",
+        "Eşleştirilmiş cihazlar kontrol ediliyor...",
+    ]
+}
+
 /// Bridges `BluetoothManager` data into SwiftUI-friendly state and actions.
 @MainActor
 @Observable
@@ -39,8 +49,16 @@ final class BatteryViewModel {
     @ObservationIgnored
     private var devicesUpdateObserver: DevicesUpdateObserver?
 
+    @ObservationIgnored
+    private var scanTask: Task<Void, Never>?
+
+    @ObservationIgnored
+    private var messageRotationTask: Task<Void, Never>?
+
     private(set) var devices: [BluetoothDevice] = []
-    private(set) var isRefreshing = false
+    private(set) var isScanning = false
+    private(set) var scanningStatusMessage = ScanningMessages.rotating[0]
+    private(set) var scanDidFail = false
     private(set) var lastRefreshed: Date?
 
     var menuBarSymbolName: String {
@@ -48,7 +66,7 @@ final class BatteryViewModel {
     }
 
     var isEmpty: Bool {
-        devices.isEmpty
+        !isScanning && devices.isEmpty
     }
 
     private var lowestBatteryPercent: Int? {
@@ -56,11 +74,12 @@ final class BatteryViewModel {
     }
 
     var statusSubtitle: String {
-        if isRefreshing { return "Refreshing…" }
-        guard let lastRefreshed else { return "No scan yet" }
+        if isScanning { return scanningStatusMessage }
+        if scanDidFail { return "Tarama tamamlanamadı" }
+        guard let lastRefreshed else { return "Henüz tarama yapılmadı" }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
-        return "Updated \(formatter.localizedString(for: lastRefreshed, relativeTo: Date()))"
+        return "Güncellendi \(formatter.localizedString(for: lastRefreshed, relativeTo: Date()))"
     }
 
     init(manager: BluetoothManager) {
@@ -72,16 +91,70 @@ final class BatteryViewModel {
     }
 
     private func syncFromManager() {
+        guard !isScanning else { return }
         devices = manager.devices
-        isRefreshing = manager.isRefreshing
         lastRefreshed = manager.lastRefreshed
     }
 
     func refresh() {
-        manager.refresh()
+        guard !isScanning else { return }
+        scanTask?.cancel()
+        scanTask = Task { await performScan() }
+    }
+
+    private func performScan() async {
+        isScanning = true
+        scanDidFail = false
+        startMessageRotation()
+
+        let minimumDuration = Double.random(in: 1.0...3.0)
+
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                await self.manager.refreshDevices()
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(minimumDuration * 1_000_000_000))
+            }
+            await group.waitForAll()
+        }
+
+        if Task.isCancelled {
+            stopMessageRotation()
+            isScanning = false
+            return
+        }
+
+        stopMessageRotation()
+        isScanning = false
+        scanDidFail = false
+        devices = manager.devices
+        lastRefreshed = manager.lastRefreshed
+    }
+
+    private func startMessageRotation() {
+        scanningStatusMessage = ScanningMessages.rotating.randomElement() ?? ScanningMessages.rotating[0]
+        messageRotationTask?.cancel()
+        messageRotationTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                guard !Task.isCancelled else { break }
+                await MainActor.run {
+                    scanningStatusMessage = ScanningMessages.rotating.randomElement()
+                        ?? ScanningMessages.rotating[0]
+                }
+            }
+        }
+    }
+
+    private func stopMessageRotation() {
+        messageRotationTask?.cancel()
+        messageRotationTask = nil
     }
 
     func quit() {
+        scanTask?.cancel()
+        messageRotationTask?.cancel()
         NSApplication.shared.terminate(nil)
     }
 }
