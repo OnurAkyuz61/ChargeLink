@@ -558,11 +558,12 @@ private final class BluetoothRuntimeResources {
             let key = device.addressString ?? "\(ObjectIdentifier(device))"
             guard seenAddresses.insert(key).inserted else { continue }
 
-            let notification = device.registerForDisconnectNotification(
-                bridge,
+            if let notification = device.register(
+                forDisconnectNotification: bridge,
                 selector: #selector(BluetoothConnectionBridge.deviceDisconnected(notification:device:))
-            )
-            ioBluetoothNotifications.append(notification)
+            ) {
+                ioBluetoothNotifications.append(notification)
+            }
         }
 
         BluetoothDebug.log("Registered disconnect notifications for \(seenAddresses.count) device(s)")
