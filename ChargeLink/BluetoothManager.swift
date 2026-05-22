@@ -335,6 +335,48 @@ enum BluetoothDeviceClassMapper {
     }
 }
 
+// MARK: - Runtime Resources
+
+/// Owns timers and NotificationCenter tokens so `@Observable` types avoid nonisolated stored state.
+private final class BluetoothRuntimeResources {
+    private var pollTimer: Timer?
+    private var notificationObservers: [NSObjectProtocol] = []
+
+    init(pollInterval: TimeInterval, onRefresh: @escaping @MainActor () -> Void) {
+        let notificationNames = [
+            kIOBluetoothDeviceNotificationNameConnected,
+            kIOBluetoothDeviceNotificationNameDisconnected,
+        ]
+
+        for name in notificationNames {
+            let observer = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name(name),
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    onRefresh()
+                }
+            }
+            notificationObservers.append(observer)
+        }
+
+        pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                onRefresh()
+            }
+        }
+        if let pollTimer {
+            RunLoop.main.add(pollTimer, forMode: .common)
+        }
+    }
+
+    deinit {
+        notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        pollTimer?.invalidate()
+    }
+}
+
 // MARK: - Bluetooth Manager
 
 @MainActor
@@ -346,19 +388,16 @@ final class BluetoothManager {
     private(set) var isRefreshing = false
     private(set) var lastRefreshed: Date?
 
-    private nonisolated var pollTimer: Timer?
-    private nonisolated var notificationObservers: [NSObjectProtocol] = []
+    @ObservationIgnored
+    private var runtime: BluetoothRuntimeResources?
+
     private let pollInterval: TimeInterval = 45
 
     private init() {
-        registerForDeviceNotifications()
-        startPolling()
         refresh()
-    }
-
-    nonisolated deinit {
-        notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
-        pollTimer?.invalidate()
+        runtime = BluetoothRuntimeResources(pollInterval: pollInterval) { [weak self] in
+            self?.refresh()
+        }
     }
 
     func refresh() {
@@ -414,41 +453,4 @@ final class BluetoothManager {
         return results
     }
 
-    // MARK: - Notifications
-
-    private func registerForDeviceNotifications() {
-        let notificationNames = [
-            kIOBluetoothDeviceNotificationNameConnected,
-            kIOBluetoothDeviceNotificationNameDisconnected,
-        ]
-
-        for name in notificationNames {
-            let observer = NotificationCenter.default.addObserver(
-                forName: NSNotification.Name(name),
-                object: nil,
-                queue: .main
-            ) { [weak self] _ in
-                guard let self else { return }
-                MainActor.assumeIsolated {
-                    self.refresh()
-                }
-            }
-            notificationObservers.append(observer)
-        }
-    }
-
-    // MARK: - Polling
-
-    private func startPolling() {
-        pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            MainActor.assumeIsolated {
-                self.refresh()
-            }
-        }
-        if let pollTimer {
-            RunLoop.main.add(pollTimer, forMode: .common)
-        }
-    }
 }

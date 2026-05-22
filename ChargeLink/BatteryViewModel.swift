@@ -7,12 +7,37 @@ import AppKit
 import Foundation
 import Observation
 
+/// Holds a NotificationCenter observer and unregisters it on deallocation.
+private final class DevicesUpdateObserver {
+    private var token: NSObjectProtocol?
+
+    init(manager: BluetoothManager, handler: @escaping @MainActor () -> Void) {
+        token = NotificationCenter.default.addObserver(
+            forName: .chargeLinkDevicesDidUpdate,
+            object: manager,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                handler()
+            }
+        }
+    }
+
+    deinit {
+        if let token {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+}
+
 /// Bridges `BluetoothManager` data into SwiftUI-friendly state and actions.
 @MainActor
 @Observable
 final class BatteryViewModel {
     private let manager: BluetoothManager
-    private nonisolated var updateObserver: NSObjectProtocol?
+
+    @ObservationIgnored
+    private var devicesUpdateObserver: DevicesUpdateObserver?
 
     private(set) var devices: [BluetoothDevice] = []
     private(set) var isRefreshing = false
@@ -41,21 +66,8 @@ final class BatteryViewModel {
     init(manager: BluetoothManager) {
         self.manager = manager
         syncFromManager()
-        updateObserver = NotificationCenter.default.addObserver(
-            forName: .chargeLinkDevicesDidUpdate,
-            object: manager,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            MainActor.assumeIsolated {
-                self.syncFromManager()
-            }
-        }
-    }
-
-    nonisolated deinit {
-        if let updateObserver {
-            NotificationCenter.default.removeObserver(updateObserver)
+        devicesUpdateObserver = DevicesUpdateObserver(manager: manager) { [weak self] in
+            self?.syncFromManager()
         }
     }
 
