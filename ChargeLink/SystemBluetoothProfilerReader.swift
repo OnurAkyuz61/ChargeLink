@@ -74,16 +74,16 @@ enum SystemBluetoothProfilerReader {
         var single: Int?
 
         func flushDevice() {
-            guard let currentName else { return }
+            guard let deviceName = currentName else { return }
             let info = buildInfo(
-                name: currentName,
+                name: deviceName,
                 address: currentAddress,
                 left: left,
                 right: right,
                 caseBatt: caseBatt,
                 single: single
             )
-            let nameKey = DeviceNameMatcher.normalize(currentName)
+            let nameKey = DeviceNameMatcher.normalize(deviceName)
             result[nameKey] = info
             if let currentAddress {
                 let addrKey = BluetoothAddressNormalizer.normalize(currentAddress)
@@ -91,7 +91,7 @@ enum SystemBluetoothProfilerReader {
                     result[addrKey] = info
                 }
             }
-            BluetoothDebug.log("system_profiler: \(currentName) → \(info.detailText ?? info.percent.map { "\($0)%" } ?? "—")")
+            BluetoothDebug.log("system_profiler: \(deviceName) → \(info.detailText ?? info.percent.map { "\($0)%" } ?? "—")")
             currentName = nil
             currentAddress = nil
             left = nil
